@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { createService } from '../src/main/services';
-import { git } from '../src/main/services/repository';
+import { ensureTaskWorktree, git, projectWorktreeDirectory } from '../src/main/services/repository';
 import { cliStatus, type CliRequest, type CliResult } from '../src/main/services/cli';
 import type { CollaborationEvent, TaskInput } from '../src/shared/types';
 
@@ -314,4 +314,58 @@ describe('local CLI executable settings', () => {
       if (originalImplementation) mockedStatus.mockImplementation(originalImplementation);
     }
   }));
+});
+
+describe('project deletion', () => {
+  it('requires the project name and moves its folder and managed worktrees before removing the registry entry', () => withTemporaryWorkspace(async (workspace) => {
+    const projectPath = path.join(workspace, 'project');
+    const registryPath = path.join(workspace, 'app-data', 'registry.json');
+    const trashed: string[] = [];
+    const service = createService({
+      registryPath,
+      emit: () => undefined,
+      autoStartSessions: false,
+      trashItem: async (target) => {
+        if (!path.relative(workspace, target) || path.relative(workspace, target).startsWith('..')) {
+          throw new Error(`Test refused to delete outside its temporary workspace: ${target}`);
+        }
+        trashed.push(target);
+        await rm(target, { recursive: true });
+      },
+    });
+    const created = await service.createProject({ path: projectPath, name: 'Delete me', goal: 'Test deletion' });
+    const task = (await service.createTask(projectPath, taskInput())).tasks[0];
+    const worktree = await ensureTaskWorktree(projectPath, created.project.id, task.id);
+    await writeFile(path.join(projectPath, 'user-artifact.txt'), 'User content', 'utf8');
+
+    await expect(service.deleteProject(projectPath, created.project.id, 'wrong name')).rejects.toThrow('일치하지 않습니다');
+    expect(trashed).toHaveLength(0);
+    expect(await readFile(path.join(projectPath, 'user-artifact.txt'), 'utf8')).toBe('User content');
+
+    await service.deleteProject(projectPath, created.project.id, created.project.name);
+    expect(trashed).toContain(projectWorktreeDirectory(projectPath, created.project.id));
+    expect(trashed).toContain(projectPath);
+    await expect(readFile(path.join(projectPath, 'user-artifact.txt'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(readFile(path.join(worktree.directory, '.git'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(JSON.parse(await readFile(registryPath, 'utf8'))).toEqual([]);
+    expect((await service.bootstrap()).projects).toEqual([]);
+  }), 30_000);
+
+  it('stops deletion when a Git worktree is outside the app-owned directory', () => withTemporaryWorkspace(async (workspace) => {
+    const projectPath = path.join(workspace, 'project');
+    const externalWorktree = path.join(workspace, 'external-worktree');
+    const trashed: string[] = [];
+    const service = createService({
+      registryPath: path.join(workspace, 'app-data', 'registry.json'),
+      emit: () => undefined,
+      autoStartSessions: false,
+      trashItem: async (target) => { trashed.push(target); },
+    });
+    const created = await service.createProject({ path: projectPath, name: 'Keep me', goal: 'Protect external worktrees' });
+    await git(projectPath, ['worktree', 'add', '-b', 'external-test', externalWorktree, 'HEAD']);
+
+    await expect(service.deleteProject(projectPath, created.project.id, created.project.name)).rejects.toThrow('관리 범위 밖');
+    expect(trashed).toEqual([]);
+    expect((await service.bootstrap()).projects).toHaveLength(1);
+  }), 30_000);
 });

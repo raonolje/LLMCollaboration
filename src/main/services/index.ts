@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdir, readFile, readdir, realpath, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, realpath, stat, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import type {
@@ -29,8 +30,10 @@ import {
   commitTaskWorktree,
   ensureProjectRepository,
   ensureTaskWorktree,
+  git,
   integrateTask,
   projectFiles,
+  projectWorktreeDirectory,
   readEvents,
   readProject,
   readTasks,
@@ -46,12 +49,41 @@ export type ServiceOptions = Readonly<{
   emit: (event: CollaborationEvent) => void;
   runModel?: typeof runCli;
   autoStartSessions?: boolean;
+  trashItem?: (target: string) => Promise<void>;
 }>;
 
 const providers: readonly Provider[] = ['codex', 'claude'];
 const opposite = (provider: Provider): Provider => provider === 'codex' ? 'claude' : 'codex';
 const now = (): string => new Date().toISOString();
 const key = (projectPath: string, taskId: string): string => `${path.resolve(projectPath)}::${taskId}`;
+const samePath = (left: string, right: string): boolean =>
+  process.platform === 'win32'
+    ? path.resolve(left).toLocaleLowerCase() === path.resolve(right).toLocaleLowerCase()
+    : path.resolve(left) === path.resolve(right);
+const containsPath = (parent: string, child: string): boolean => {
+  const relative = path.relative(parent, child);
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+};
+const assertRealDirectory = async (directory: string): Promise<void> => {
+  const entry = await lstat(directory);
+  if (!entry.isDirectory() || entry.isSymbolicLink() || !samePath(await realpath(directory), directory)) {
+    throw new Error(`실제 폴더만 삭제할 수 있습니다: ${directory}`);
+  }
+};
+const assertSafeProjectDirectory = async (directory: string, registryPath: string): Promise<void> => {
+  const home = os.homedir();
+  const protectedLocations = [
+    home,
+    ...['Desktop', 'Documents', 'Downloads', 'Pictures', 'Music', 'Videos', 'AppData'].map((name) => path.join(home, name)),
+    registryPath,
+    process.execPath,
+  ];
+  if (samePath(directory, path.parse(directory).root)
+    || protectedLocations.some((location) => containsPath(directory, location))) {
+    throw new Error('시스템 또는 사용자 기본 폴더를 포함하는 경로는 삭제할 수 없습니다.');
+  }
+  await assertRealDirectory(directory);
+};
 const modelFor = (task: Task, provider: Provider): ModelChoice =>
   [task.executor, task.reviewer].find((choice) => choice.provider === provider) ?? { provider, model: 'default' };
 
@@ -194,7 +226,8 @@ const readInvocationPrompt = async (filename: string): Promise<string> => {
   }
 };
 
-export const createService = ({ registryPath, emit, runModel = runCli, autoStartSessions = true }: ServiceOptions): Service => {
+export const createService = ({ registryPath, emit, runModel = runCli, autoStartSessions = true,
+  trashItem = async () => { throw new Error('휴지통 기능을 사용할 수 없습니다.'); } }: ServiceOptions): Service => {
   const cliSettingsPath = path.join(path.dirname(registryPath), 'cli-settings.json');
   const hostIdPromise = (async (): Promise<string> => {
     const file = path.join(path.dirname(registryPath), 'session-host-id');
@@ -293,18 +326,27 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
     return task;
   };
 
+  const readRegisteredPaths = async (): Promise<string[]> =>
+    readFile(registryPath, 'utf8')
+      .then((content) => JSON.parse(content) as string[])
+      .catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+        throw error;
+      });
+
   const registerProject = async (projectPath: string): Promise<void> => {
     await withLock('registry', async () => {
-      const paths = await readFile(registryPath, 'utf8')
-        .then((content) => JSON.parse(content) as string[])
-        .catch((error: unknown) => {
-          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
-          throw error;
-        });
-      if (paths.some((candidate) => path.resolve(candidate) === projectPath)) return;
+      const paths = await readRegisteredPaths();
+      if (paths.some((candidate) => samePath(candidate, projectPath))) return;
       await writeJson(registryPath, [...paths, projectPath]);
     });
   };
+
+  const unregisterProject = async (projectPath: string): Promise<void> =>
+    withLock('registry', async () => {
+      const paths = await readRegisteredPaths();
+      await writeJson(registryPath, paths.filter((candidate) => !samePath(candidate, projectPath)));
+    });
 
   const taskById = async (projectPath: string, taskId: string): Promise<{ project: Project; task: Task; events: CollaborationEvent[] }> => {
     const current = await snapshot(projectPath);
@@ -434,12 +476,7 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
 
   const service: Service = {
     bootstrap: async (): Promise<Bootstrap> => {
-      const projectPaths = await readFile(registryPath, 'utf8')
-        .then((content) => JSON.parse(content) as string[])
-        .catch((error: unknown) => {
-          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
-          throw error;
-        });
+      const projectPaths = await readRegisteredPaths();
       const [projectResults, cliResults] = await Promise.all([
         Promise.allSettled(projectPaths.map(async (projectPath) => ({ ...await readProject(projectPath), path: path.resolve(projectPath) }))),
         cliStatuses(),
@@ -500,6 +537,48 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
       await event(projectPath, project.id, 'system', 'system', `프로젝트를 생성했습니다. 목표: ${project.goal}`);
       if (autoStartSessions) await startProjectSessions(projectPath);
       return snapshot(projectPath);
+    },
+
+    deleteProject: async (projectPath: string, projectId: string, confirmation: string): Promise<void> => {
+      const resolved = path.resolve(projectPath);
+      await withLock(`delete:${resolved}`, async () => {
+        const registered = await readRegisteredPaths();
+        if (!registered.some((candidate) => samePath(candidate, resolved))) throw new Error('등록된 프로젝트가 아닙니다.');
+        if (registered.some((candidate) => !samePath(candidate, resolved) && containsPath(resolved, candidate))) {
+          throw new Error('이 폴더 안에 등록된 다른 프로젝트가 있습니다. 내부 프로젝트부터 삭제하세요.');
+        }
+        if (Array.from(active.keys()).some((runKey) => runKey.startsWith(`${resolved}::`))) {
+          throw new Error('진행 중인 업무가 있습니다. 업무가 끝난 뒤 프로젝트를 삭제하세요.');
+        }
+        const project = await readProject(resolved);
+        if (project.id !== projectId || !samePath(project.path, resolved) || confirmation !== project.name) {
+          throw new Error('프로젝트 이름 또는 식별자가 일치하지 않습니다.');
+        }
+        await assertSafeProjectDirectory(resolved, registryPath);
+        if (!samePath(await git(resolved, ['rev-parse', '--show-toplevel']), resolved)) {
+          throw new Error('프로젝트 폴더가 Git 저장소 루트가 아닙니다.');
+        }
+        const worktreeRoot = projectWorktreeDirectory(resolved, project.id);
+        const worktreeParent = path.dirname(worktreeRoot);
+        const worktreeExists = await lstat(worktreeRoot).then(() => true).catch((error: unknown) => {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+          throw error;
+        });
+        if (worktreeExists) {
+          await assertRealDirectory(worktreeParent);
+          await assertRealDirectory(worktreeRoot);
+        }
+        const worktrees = (await git(resolved, ['worktree', 'list', '--porcelain']))
+          .split(/\r?\n/u).filter((line) => line.startsWith('worktree ')).map((line) => line.slice('worktree '.length));
+        const external = worktrees.filter((directory) => !samePath(directory, resolved) && !containsPath(worktreeRoot, directory));
+        if (external.length) throw new Error(`앱 관리 범위 밖의 Git worktree가 있습니다: ${external.join(', ')}`);
+        if (worktreeExists) {
+          await trashItem(worktreeRoot);
+          if ((await readdir(worktreeParent)).length === 0) await trashItem(worktreeParent);
+        }
+        await trashItem(resolved);
+        await unregisterProject(resolved);
+      });
     },
 
     openProject: async (projectPath: string): Promise<ProjectSnapshot> => {

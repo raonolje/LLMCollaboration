@@ -97,8 +97,11 @@ export const commitMetadata = async (projectPath: string, message: string): Prom
 
 export const taskBranch = (taskId: string): string => `llm/task-${taskId.replace(/[^a-zA-Z0-9-]/gu, '')}`;
 
+export const projectWorktreeDirectory = (projectPath: string, projectId: string): string =>
+  path.join(path.dirname(projectPath), `${path.basename(projectPath)}.llm-worktrees`, projectId);
+
 export const taskWorktree = (projectPath: string, projectId: string, taskId: string): string =>
-  path.join(path.dirname(projectPath), `${path.basename(projectPath)}.llm-worktrees`, projectId, taskId);
+  path.join(projectWorktreeDirectory(projectPath, projectId), taskId);
 
 export const ensureTaskWorktree = async (
   projectPath: string,

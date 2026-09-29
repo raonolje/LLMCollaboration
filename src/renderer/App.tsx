@@ -19,7 +19,7 @@ import appIcon from '../../assets/icon.svg?url';
 import './styles.css';
 
 type Tab = 'overview' | 'tasks' | 'debate' | 'history';
-type Dialog = 'project' | 'task' | 'transcript' | 'session-history' | null;
+type Dialog = 'project' | 'task' | 'delete-project' | 'transcript' | 'session-history' | null;
 
 const statusLabel: Record<TaskStatus, string> = {
   draft: '초안',
@@ -102,6 +102,7 @@ export default function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [toast, setToast] = useState<{ message: string; error: boolean } | null>(null);
   const [projectDraft, setProjectDraft] = useState<ProjectInput>(defaultProject);
+  const [deleteConfirmation, setDeleteConfirmation] = useState('');
   const [taskDraft, setTaskDraft] = useState<TaskInput>(emptyTask());
   const [criteriaDraft, setCriteriaDraft] = useState('');
   const [editingTask, setEditingTask] = useState<Task | null>(null);
@@ -193,6 +194,21 @@ export default function App() {
     void perform('프로젝트를 여는 중', async () => {
       await refresh(item.path);
       setTab('overview');
+    });
+  };
+
+  const deleteCurrentProject = (): void => {
+    if (!project || deleteConfirmation !== project.name || runningTaskIds.size > 0) return;
+    const removed = project;
+    void perform('프로젝트 삭제 중', async () => {
+      await window.collab.deleteProject(removed.path, removed.id, deleteConfirmation);
+      setProjects((previous) => previous.filter((item) => item.id !== removed.id));
+      setBootstrap((previous) => previous && ({ ...previous, projects: previous.projects.filter((item) => item.id !== removed.id) }));
+      setSnapshot(null);
+      setDialog(null);
+      setDeleteConfirmation('');
+      setTab('overview');
+      notify(`${removed.name} 프로젝트 폴더를 휴지통으로 이동했습니다.`);
     });
   };
 
@@ -612,7 +628,7 @@ export default function App() {
       <header className="topbar"><div className="breadcrumbs">프로젝트 <span> / </span><strong>{project?.name ?? '시작하기'}</strong></div><div className="topbar-actions"><span className={'topbar-note ' + (busy || runningTaskIds.size ? 'busy' : '')}>{busy ? '◌ ' + busy + '…' : runningTaskIds.size ? `◌ 업무 ${runningTaskIds.size}개 실행 중` : '로컬 CLI · 로컬 기록 · Git'}</span>{project && <button className="button small" onClick={() => void perform('새로고침 중', async () => refresh(project.path))} disabled={!!busy}>↻ 새로고침</button>}</div></header>
       <main className="content">
         {project ? <>
-          <div className="page-head"><div><div className="eyebrow">WORKSPACE</div><h1>{project.name}</h1><p className="subtle">{project.goal || '프로젝트 목표를 바탕으로 두 모델이 계획하고 검수합니다.'}</p></div><div className="page-actions"><button className="button" onClick={() => setTab('history')}>이력 검색</button><button className="button primary" onClick={() => openTaskDialog()}>＋ 새 업무</button></div></div>
+          <div className="page-head"><div><div className="eyebrow">WORKSPACE</div><h1>{project.name}</h1><p className="subtle">{project.goal || '프로젝트 목표를 바탕으로 두 모델이 계획하고 검수합니다.'}</p></div><div className="page-actions"><button className="button danger" type="button" disabled={!!busy || runningTaskIds.size > 0} onClick={() => { setDeleteConfirmation(''); setDialog('delete-project'); }}>프로젝트 삭제</button><button className="button" onClick={() => setTab('history')}>이력 검색</button><button className="button primary" onClick={() => openTaskDialog()}>＋ 새 업무</button></div></div>
           <nav className="tabs" aria-label="프로젝트 화면"><button className={'tab ' + (tab === 'overview' ? 'active' : '')} onClick={() => setTab('overview')}>개요</button><button className={'tab ' + (tab === 'tasks' ? 'active' : '')} onClick={() => setTab('tasks')}>업무 <span className="tab-count">{tasks.length}</span></button><button className={'tab ' + (tab === 'debate' ? 'active' : '')} onClick={() => setTab('debate')}>논쟁</button><button className={'tab ' + (tab === 'history' ? 'active' : '')} onClick={() => setTab('history')}>전체 이력</button></nav>
           {tab === 'overview' ? renderOverview() : tab === 'tasks' ? renderTasks() : tab === 'debate' ? renderDebate() : renderHistory()}
         </> : <div className="welcome"><div className="panel welcome-card"><div className="brand-symbol"><img src={appIcon} alt="" /></div><div className="eyebrow">LOCAL FIRST WORKSPACE</div><h1>두 모델의 관점을 한곳에서</h1><p className="subtle">프로젝트 폴더를 지정하고 Codex와 Claude가 논쟁, 분업, 교차 검수를 진행하도록 설정하세요. 모든 대화와 산출물은 로컬에 보존됩니다.</p><button className="button primary" onClick={() => setDialog('project')}>첫 프로젝트 만들기</button></div></div>}
@@ -627,6 +643,7 @@ export default function App() {
       <div className="field"><label htmlFor="project-rounds">기본 토론 왕복 횟수</label><input id="project-rounds" type="number" min={1} max={8} value={projectDraft.defaultDebateRounds ?? 2} onChange={(event) => setProjectDraft((previous) => ({ ...previous, defaultDebateRounds: Number(event.target.value) }))} /><span>기본값은 2회이며 프로젝트와 업무마다 조정할 수 있습니다.</span></div>
       <div className="form-actions"><button className="button" type="button" onClick={() => setDialog(null)}>취소</button><button className="button primary" type="submit" disabled={!!busy}>프로젝트 만들기</button></div>
     </form></div></div>}
+    {dialog === 'delete-project' && project && <div className="modal-backdrop"><div className="modal" role="dialog" aria-modal="true" aria-label="프로젝트 삭제 확인"><div className="modal-header"><div><h2>프로젝트 삭제</h2><p className="subtle">프로젝트 폴더와 앱이 만든 작업용 폴더를 휴지통으로 이동합니다.</p></div><button className="close" aria-label="닫기" disabled={!!busy} onClick={() => setDialog(null)}>×</button></div><div className="modal-body form-stack"><div className="note"><strong>삭제할 프로젝트</strong><br />{project.name}</div><div className="folder-line">{project.path}</div><div className="field"><label htmlFor="delete-project-name">확인하려면 프로젝트 이름을 그대로 입력하세요</label><input id="delete-project-name" autoComplete="off" value={deleteConfirmation} onChange={(event) => setDeleteConfirmation(event.target.value)} placeholder={project.name} /></div><div className="form-actions"><button className="button" type="button" disabled={!!busy} onClick={() => setDialog(null)}>취소</button><button className="button danger" type="button" disabled={!!busy || deleteConfirmation !== project.name || runningTaskIds.size > 0} onClick={deleteCurrentProject}>폴더와 프로젝트 삭제</button></div></div></div></div>}
     {dialog === 'task' && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setDialog(null)}><div className="modal" role="dialog" aria-modal="true" aria-label={editingTask ? '업무 편집' : '업무 만들기'}><div className="modal-header"><div><h2>{editingTask ? '업무 편집' : '새 업무'}</h2><p className="subtle">완료 기준과 모델별 역할을 명확히 지정합니다.</p></div><button className="close" aria-label="닫기" onClick={() => setDialog(null)}>×</button></div><form className="modal-body form-stack" onSubmit={submitTask}>
       <div className="field"><label htmlFor="task-title">업무 제목</label><input id="task-title" required value={taskDraft.title} onChange={(event) => setTaskDraft((previous) => ({ ...previous, title: event.target.value }))} placeholder="예: 로그인 화면 구현" /></div>
       <div className="field"><label htmlFor="task-description">구체적인 지시</label><textarea id="task-description" required value={taskDraft.description} onChange={(event) => setTaskDraft((previous) => ({ ...previous, description: event.target.value }))} placeholder="필요한 기능, 범위, 제약을 적어 주세요." /></div>

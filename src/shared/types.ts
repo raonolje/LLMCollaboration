@@ -133,6 +133,7 @@ export type CollaborationAPI = Readonly<{
   setCliExecutable: (provider: Provider, filePath: string | null) => Promise<CliStatus[]>;
   refreshCliStatus: () => Promise<CliStatus[]>;
   createProject: (input: ProjectInput) => Promise<ProjectSnapshot>;
+  deleteProject: (projectPath: string, projectId: string, confirmation: string) => Promise<void>;
   openProject: (projectPath: string) => Promise<ProjectSnapshot>;
   updateCharter: (projectPath: string, charter: string) => Promise<ProjectSnapshot>;
   updateProjectRounds: (projectPath: string, rounds: number) => Promise<ProjectSnapshot>;

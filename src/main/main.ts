@@ -42,6 +42,7 @@ const registerHandlers = (): void => {
   const service = createService({
     registryPath: path.join(app.getPath('userData'), 'projects.json'),
     emit: (event: CollaborationEvent) => mainWindow?.webContents.send('collab:event', event),
+    trashItem: (target: string) => shell.trashItem(target),
   });
 
   ipcMain.handle('collab:bootstrap', () => service.bootstrap());
@@ -69,6 +70,7 @@ const registerHandlers = (): void => {
   ipcMain.handle('collab:setCliExecutable', (_event, provider, filePath) => service.setCliExecutable(provider, filePath));
   ipcMain.handle('collab:refreshCliStatus', () => service.refreshCliStatus());
   ipcMain.handle('collab:createProject', (_event, input) => service.createProject(input));
+  ipcMain.handle('collab:deleteProject', (_event, projectPath, projectId, confirmation) => service.deleteProject(projectPath, projectId, confirmation));
   ipcMain.handle('collab:openProject', (_event, projectPath) => service.openProject(projectPath));
   ipcMain.handle('collab:updateCharter', (_event, projectPath, charter) => service.updateCharter(projectPath, charter));
   ipcMain.handle('collab:updateProjectRounds', (_event, projectPath, rounds) => service.updateProjectRounds(projectPath, rounds));

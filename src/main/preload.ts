@@ -10,6 +10,7 @@ const api: CollaborationAPI = {
   setCliExecutable: (provider, filePath) => invoke('collab:setCliExecutable', provider, filePath),
   refreshCliStatus: () => invoke('collab:refreshCliStatus'),
   createProject: (input) => invoke('collab:createProject', input),
+  deleteProject: (projectPath, projectId, confirmation) => invoke('collab:deleteProject', projectPath, projectId, confirmation),
   openProject: (projectPath) => invoke('collab:openProject', projectPath),
   updateCharter: (projectPath, charter) => invoke('collab:updateCharter', projectPath, charter),
   updateProjectRounds: (projectPath, rounds) => invoke('collab:updateProjectRounds', projectPath, rounds),
