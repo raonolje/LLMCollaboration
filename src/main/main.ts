@@ -4,6 +4,7 @@ import type { CollaborationEvent, LaunchRequest, Provider } from '../shared/type
 import { createService } from './services';
 import { installChatSkills, parseLaunchUrl } from './chat-link';
 import { recycleDirectoryWithWindows } from './windows-recycle';
+import { checkAppUpdate, downloadAppUpdate, launchDownloadedUpdate } from './updater';
 
 let mainWindow: BrowserWindow | null = null;
 const trashItemWithFallback = async (target: string): Promise<void> => {
@@ -102,6 +103,15 @@ const registerHandlers = (): void => {
   });
   ipcMain.handle('collab:setCliExecutable', (_event, provider, filePath) => service.setCliExecutable(provider, filePath));
   ipcMain.handle('collab:refreshCliStatus', () => service.refreshCliStatus());
+  ipcMain.handle('collab:refreshModelCatalogs', () => service.refreshModelCatalogs());
+  ipcMain.handle('collab:checkAppUpdate', () => checkAppUpdate(app.getVersion(), process.platform, process.arch, !!process.env.PORTABLE_EXECUTABLE_FILE));
+  ipcMain.handle('collab:downloadAppUpdate', async () => {
+    const downloaded = await downloadAppUpdate(app.getVersion(), process.platform, process.arch,
+      !!process.env.PORTABLE_EXECUTABLE_FILE, app.getPath('userData'));
+    launchDownloadedUpdate(downloaded);
+    setTimeout(() => app.quit(), 200);
+    return downloaded;
+  });
   ipcMain.handle('collab:createProject', (_event, input) => service.createProject(input));
   ipcMain.handle('collab:sendProjectMessage', (_event, projectPath, message, target, models) => service.sendProjectMessage(projectPath, message, target, models));
   ipcMain.handle('collab:cancelProjectMessage', (_event, projectPath) => service.cancelProjectMessage(projectPath));

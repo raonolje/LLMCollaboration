@@ -5,6 +5,31 @@ export type ModelChoice = Readonly<{
   model: string;
 }>;
 
+export type ChatModelSettings = Readonly<{ model: string; effort: string }>;
+export type ModelOption = Readonly<{
+  id: string;
+  label: string;
+  description: string;
+  efforts: string[];
+  defaultEffort?: string;
+  requiresCredits?: boolean;
+}>;
+export type ModelCatalog = Readonly<{
+  provider: Provider;
+  source: string;
+  cliVersion: string;
+  refreshedAt: string;
+  models: ModelOption[];
+  warning?: string;
+}>;
+export type AppUpdateCheck = Readonly<{
+  currentVersion: string;
+  latestVersion: string;
+  available: boolean;
+  releaseUrl: string;
+  assetName?: string;
+}>;
+
 export type ExternalSession = Readonly<{
   hostId: string;
   provider: Provider;
@@ -159,8 +184,11 @@ export type CollaborationAPI = Readonly<{
   chooseCliExecutable: () => Promise<string | null>;
   setCliExecutable: (provider: Provider, filePath: string | null) => Promise<CliStatus[]>;
   refreshCliStatus: () => Promise<CliStatus[]>;
+  refreshModelCatalogs: () => Promise<ModelCatalog[]>;
+  checkAppUpdate: () => Promise<AppUpdateCheck>;
+  downloadAppUpdate: () => Promise<string>;
   createProject: (input: ProjectInput) => Promise<ProjectSnapshot>;
-  sendProjectMessage: (projectPath: string, message: string, target: Provider | 'both', models: Partial<Record<Provider, string>>) => Promise<ProjectSnapshot>;
+  sendProjectMessage: (projectPath: string, message: string, target: Provider | 'both', models: Partial<Record<Provider, ChatModelSettings>>) => Promise<ProjectSnapshot>;
   cancelProjectMessage: (projectPath: string) => Promise<void>;
   listLocalConversations: (target?: LaunchRequest) => Promise<ConversationCandidate[]>;
   consumeLaunchRequest: () => Promise<LaunchRequest | null>;

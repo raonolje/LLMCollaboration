@@ -1,13 +1,16 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import type {
   AssignmentMode,
+  AppUpdateCheck,
   Bootstrap,
   CollaborationEvent,
   ConversationCandidate,
   ConversationTurn,
+  ChatModelSettings,
   ExternalSession,
   EventType,
   ModelChoice,
+  ModelCatalog,
   ImportedConversation,
   LaunchRequest,
   Project,
@@ -147,7 +150,11 @@ export default function App() {
   const [cliBusy, setCliBusy] = useState<Provider | 'refresh' | null>(null);
   const [chatDraft, setChatDraft] = useState('');
   const [chatTarget, setChatTarget] = useState<Provider | 'both'>('both');
-  const [chatModels, setChatModels] = useState<Record<Provider, string>>({ codex: '', claude: '' });
+  const [chatModels, setChatModels] = useState<Record<Provider, ChatModelSettings>>({ codex: { model: '', effort: '' }, claude: { model: '', effort: '' } });
+  const [modelCatalogs, setModelCatalogs] = useState<ModelCatalog[]>([]);
+  const [modelBusy, setModelBusy] = useState(false);
+  const [updateCheck, setUpdateCheck] = useState<AppUpdateCheck | null>(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
   const [chatSendingPaths, setChatSendingPaths] = useState<ReadonlySet<string>>(() => new Set());
 
   const project = snapshot?.project ?? null;
@@ -300,12 +307,47 @@ export default function App() {
     setCliBusy('refresh');
     try {
       updateCliStatuses(await window.collab.refreshCliStatus());
+      await refreshModelCatalogs();
     } catch (error) {
       notify(errorText(error), true);
     } finally {
       setCliBusy(null);
     }
   };
+
+  const refreshModelCatalogs = async (): Promise<void> => {
+    setModelBusy(true);
+    try {
+      const catalogs = await window.collab.refreshModelCatalogs();
+      setModelCatalogs(catalogs);
+      setChatModels((previous) => Object.fromEntries((['codex', 'claude'] as Provider[]).map((provider) => {
+        const current = previous[provider];
+        const selected = catalogs.find((catalog) => catalog.provider === provider)?.models.find((model) => model.id === current.model);
+        return [provider, selected ? { model: current.model, effort: selected.efforts.includes(current.effort) ? current.effort : '' } : { model: '', effort: '' }];
+      })) as Record<Provider, ChatModelSettings>);
+    } catch (error) { notify(errorText(error), true); }
+    finally { setModelBusy(false); }
+  };
+
+  const checkForUpdate = async (): Promise<void> => {
+    setUpdateBusy(true);
+    try { setUpdateCheck(await window.collab.checkAppUpdate()); }
+    catch (error) { notify(errorText(error), true); }
+    finally { setUpdateBusy(false); }
+  };
+
+  const installUpdate = async (): Promise<void> => {
+    setUpdateBusy(true);
+    try { await window.collab.downloadAppUpdate(); }
+    catch (error) { notify(errorText(error), true); setUpdateBusy(false); }
+  };
+
+  useEffect(() => {
+    void refreshModelCatalogs();
+    const onFocus = (): void => { void refreshModelCatalogs(); };
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, []);
 
   const configureCli = async (provider: Provider, automatic = false): Promise<void> => {
     setCliBusy(provider);
@@ -635,7 +677,7 @@ export default function App() {
             <div className="chat-column-head"><span className={'model-chip ' + provider}>{providerLabel(provider)}</span><span className="subtle">{visible.length}개 기록</span></div>
             <div className="chat-messages" aria-live="polite">
               {visible.length ? visible.map((item) => <article className={'chat-message ' + (item.actor === 'user' ? 'from-user' : item.type === 'error' ? 'from-error' : 'from-model')} key={item.id}>
-                <div className="chat-message-head"><strong>{actorLabel(item.actor)}</strong>{item.type !== 'chat' && <span className="badge neutral">{eventLabel[item.type]}</span>}{item.taskId && <span className="badge neutral">{tasks.find((task) => task.id === item.taskId)?.title ?? '업무'}</span>}{item.actor === 'user' && item.metadata?.target === 'both' && <span className="badge neutral">두 모델 모두</span>}{item.type === 'chat' && item.actor === provider && item.metadata?.model && <span className="badge neutral">{item.metadata.model}</span>}<span className="activity-time">{shortTime(item.timestamp)}</span></div>
+                <div className="chat-message-head"><strong>{actorLabel(item.actor)}</strong>{item.type !== 'chat' && <span className="badge neutral">{eventLabel[item.type]}</span>}{item.taskId && <span className="badge neutral">{tasks.find((task) => task.id === item.taskId)?.title ?? '업무'}</span>}{item.actor === 'user' && item.metadata?.target === 'both' && <span className="badge neutral">두 모델 모두</span>}{item.type === 'chat' && item.actor === provider && item.metadata?.model && <span className="badge neutral">{item.metadata.model}{item.metadata.effort && item.metadata.effort !== 'default' ? ` · ${item.metadata.effort}` : ''}</span>}<span className="activity-time">{shortTime(item.timestamp)}</span></div>
                 <div className="chat-message-text">{item.message}</div>
                 {item.metadata?.transcript && <button className="button ghost small" type="button" onClick={() => openTranscript(item)}>CLI 원문</button>}
               </article>) : <Empty icon="◎" title="아직 대화가 없습니다" detail={`${providerLabel(provider)}에게 첫 메시지를 보내세요.`} />}
@@ -648,7 +690,24 @@ export default function App() {
         <div className="chat-targets" role="group" aria-label="메시지 받을 모델">
           {([{ value: 'both', label: '두 모델 모두' }, { value: 'codex', label: 'Codex만' }, { value: 'claude', label: 'Claude만' }] as const).map(({ value, label }) => <button type="button" key={value} className={'button ' + (chatTarget === value ? 'primary' : '')} aria-pressed={chatTarget === value} onClick={() => setChatTarget(value)}>{label}</button>)}
         </div>
-        <div className="form-grid chat-models">{(['codex', 'claude'] as Provider[]).map((provider) => <div className="field" key={provider}><label htmlFor={`chat-model-${provider}`}>{providerLabel(provider)} 추론 모델</label><input id={`chat-model-${provider}`} value={chatModels[provider]} maxLength={100} disabled={chatTarget !== 'both' && chatTarget !== provider} onChange={(event) => setChatModels((current) => ({ ...current, [provider]: event.target.value }))} placeholder="비우면 CLI 기본 모델" /><span>이 메시지에서 사용할 CLI 모델 이름</span></div>)}</div>
+        <div className="chat-model-heading"><strong>모델과 추론 수준</strong><button className="button ghost small" type="button" disabled={modelBusy} onClick={() => void refreshModelCatalogs()}>{modelBusy ? '목록 확인 중…' : '↻ 모델 목록 새로고침'}</button></div>
+        <div className="form-grid chat-models">{(['codex', 'claude'] as Provider[]).map((provider) => {
+          const catalog = modelCatalogs.find((item) => item.provider === provider);
+          const settings = chatModels[provider];
+          const selected = catalog?.models.find((item) => item.id === settings.model);
+          const disabled = chatTarget !== 'both' && chatTarget !== provider;
+          return <div className="field" key={provider}><label htmlFor={`chat-model-${provider}`}>{providerLabel(provider)} 모델</label>
+            <select id={`chat-model-${provider}`} value={settings.model} disabled={disabled || modelBusy} onChange={(event) => setChatModels((current) => ({ ...current, [provider]: { model: event.target.value, effort: '' } }))}>
+              <option value="">CLI 기본 모델</option>{catalog?.models.map((item) => <option key={item.id} value={item.id} disabled={item.requiresCredits}>{item.label}{item.requiresCredits ? ' (추가 크레딧 가능성으로 비활성화)' : ''}</option>)}
+            </select>
+            <label htmlFor={`chat-effort-${provider}`}>추론 수준</label>
+            <select id={`chat-effort-${provider}`} value={settings.effort} disabled={disabled || !selected} onChange={(event) => setChatModels((current) => ({ ...current, [provider]: { ...current[provider], effort: event.target.value } }))}>
+              <option value="">CLI 기본 수준</option>{selected?.efforts.map((effort) => <option key={effort} value={effort}>{effort}{selected.defaultEffort === effort ? ' · 기본값' : ''}</option>)}
+            </select>
+            <span>{catalog ? `${catalog.source} · ${catalog.cliVersion}` : '모델 목록을 확인하고 있습니다.'}</span>
+            {catalog?.warning && <span className="chat-model-warning">{catalog.warning}</span>}
+          </div>;
+        })}</div>
         <div className="field"><label htmlFor="project-chat-input">메시지</label><textarea id="project-chat-input" value={chatDraft} maxLength={20_000} rows={4} onChange={(event) => setChatDraft(event.target.value)} placeholder="진행 상황을 묻거나, 수정할 방향과 완료 기준을 알려 주세요." /></div>
         <div className="chat-compose-actions"><span className="subtle">현재 실행 중인 CLI 호출에는 다음 단계부터 반영됩니다.</span><div className="session-actions">{chatSending && <button className="button danger" type="button" onClick={() => project && void window.collab.cancelProjectMessage(project.path)}>응답 중단</button>}<button className="button primary" type="submit" disabled={!chatDraft.trim() || chatSending}>{chatSending ? '답변 받는 중…' : '메시지 보내기'}</button></div></div>
       </form>
@@ -827,7 +886,7 @@ export default function App() {
       </div>
     </aside>
     <div className="main">
-      <header className="topbar"><div className="breadcrumbs">프로젝트 <span> / </span><strong>{project?.name ?? '시작하기'}</strong></div><div className="topbar-actions"><span className={'topbar-note ' + (busy || runningTaskIds.size ? 'busy' : '')}>{busy ? '◌ ' + busy + '…' : runningTaskIds.size ? `◌ 업무 ${runningTaskIds.size}개 실행 중` : '로컬 CLI · 로컬 기록 · Git'}</span>{project && <button className="button small" onClick={() => void perform('새로고침 중', async () => refresh(project.path))} disabled={!!busy}>↻ 새로고침</button>}</div></header>
+      <header className="topbar"><div className="breadcrumbs">프로젝트 <span> / </span><strong>{project?.name ?? '시작하기'}</strong></div><div className="topbar-actions"><span className={'topbar-note ' + (busy || runningTaskIds.size ? 'busy' : '')}>{busy ? '◌ ' + busy + '…' : runningTaskIds.size ? `◌ 업무 ${runningTaskIds.size}개 실행 중` : '로컬 CLI · 로컬 기록 · Git'}</span><button className="button small" type="button" disabled={updateBusy} onClick={() => void checkForUpdate()}>{updateBusy ? '업데이트 확인 중…' : '앱 업데이트'}</button>{project && <button className="button small" onClick={() => void perform('새로고침 중', async () => refresh(project.path))} disabled={!!busy}>↻ 새로고침</button>}</div></header>
       <main className="content">
         {project ? <>
           <div className="page-head"><div><div className="eyebrow">WORKSPACE</div><h1>{project.name}</h1><p className="subtle">{project.goal || '프로젝트 목표를 바탕으로 두 모델이 계획하고 검수합니다.'}</p></div><div className="page-actions"><button className="button danger" type="button" disabled={!!busy || runningTaskIds.size > 0} onClick={() => { setDeleteConfirmation(''); setDialog('delete-project'); }}>프로젝트 삭제</button><button className="button" onClick={() => setTab('history')}>이력 검색</button><button className="button primary" onClick={() => openTaskDialog()}>＋ 새 업무</button></div></div>
@@ -838,6 +897,7 @@ export default function App() {
     </div>
     {busy && <div className="busy-overlay"><div className="busy-bar" /></div>}
     {toast && <div className={'toast ' + (toast.error ? 'error' : '')} role="status" onClick={() => setToast(null)}>{toast.message}</div>}
+    {updateCheck && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setUpdateCheck(null)}><div className="modal" role="dialog" aria-modal="true" aria-label="앱 업데이트"><div className="modal-header"><div><h2>앱 업데이트</h2><p className="subtle">현재 {updateCheck.currentVersion} · 최신 {updateCheck.latestVersion}</p></div><button className="close" aria-label="닫기" onClick={() => setUpdateCheck(null)}>×</button></div><div className="modal-body"><p className="subtle">{updateCheck.available ? updateCheck.assetName ? `${updateCheck.assetName} 파일을 내려받아 SHA-256 확인 후 실행합니다. 앱이 종료됩니다.` : '새 버전이 있지만 이 운영체제용 파일이 없습니다.' : '현재 최신 버전을 사용 중입니다.'}</p><div className="form-actions"><button className="button" type="button" onClick={() => setUpdateCheck(null)}>닫기</button>{updateCheck.available && updateCheck.assetName && <button className="button primary" type="button" disabled={updateBusy} onClick={() => void installUpdate()}>{updateBusy ? '다운로드 중…' : '다운로드하고 업데이트'}</button>}</div></div></div></div>}
     {dialog === 'project' && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setDialog(null)}><div className="modal" role="dialog" aria-modal="true" aria-label="프로젝트 만들기"><div className="modal-header"><div><h2>새 프로젝트</h2><p className="subtle">지정한 폴더에 모든 산출물과 Git 기록을 저장합니다.</p></div><button className="close" aria-label="닫기" onClick={() => setDialog(null)}>×</button></div><form className="modal-body form-stack" onSubmit={submitProject}>
       <div className="field"><label htmlFor="project-name">프로젝트 이름</label><input id="project-name" required value={projectDraft.name} onChange={(event) => setProjectDraft((previous) => ({ ...previous, name: event.target.value }))} placeholder="예: 새 서비스 개발" /></div>
       <div className="field"><label htmlFor="project-folder">프로젝트 폴더</label><div className="search-box"><input id="project-folder" required value={projectDraft.path} onChange={(event) => setProjectDraft((previous) => ({ ...previous, path: event.target.value }))} placeholder="절대 경로" /><button className="button" type="button" onClick={chooseDirectory}>폴더 선택</button></div><span>기존 폴더를 선택하거나 새 폴더 경로를 입력할 수 있습니다.</span></div>

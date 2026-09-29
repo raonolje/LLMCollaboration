@@ -69,19 +69,21 @@ describe('service orchestration with an injected model', () => {
     });
     await service.createProject({ path: projectPath, name: 'Team room', goal: 'Build a reviewed app' });
     await service.updateCharter(projectPath, 'Keep all project records in Git.');
-    const first = await service.sendProjectMessage(projectPath, 'Both models: review the direction', 'both', { codex: 'codex-chat-model', claude: 'claude-chat-model' });
+    const first = await service.sendProjectMessage(projectPath, 'Both models: review the direction', 'both', { codex: { model: 'codex-chat-model', effort: 'high' }, claude: { model: 'claude-chat-model', effort: 'medium' } });
     expect(calls.map(({ choice, readOnly, phase }) => [choice.provider, readOnly, phase])).toEqual([
       ['codex', true, 'project-chat'], ['claude', true, 'project-chat'],
     ]);
     expect(calls.map(({ choice }) => choice.model)).toEqual(['codex-chat-model', 'claude-chat-model']);
+    expect(calls.map(({ effort }) => effort)).toEqual(['high', 'medium']);
     expect(first.events.filter((item) => item.type === 'chat').map((item) => item.actor).sort()).toEqual(['claude', 'codex', 'user']);
     expect(first.project.sessions?.map((item) => item.provider).sort()).toEqual(['claude', 'codex']);
     expect(calls.every((call) => call.prompt.includes('Keep all project records in Git.'))).toBe(true);
 
-    const second = await service.sendProjectMessage(projectPath, 'Codex only: use the local index', 'codex', { codex: 'codex-next-model' });
+    const second = await service.sendProjectMessage(projectPath, 'Codex only: use the local index', 'codex', { codex: { model: 'codex-next-model', effort: 'xhigh' } });
     expect(calls).toHaveLength(3);
     expect(calls[2]).toMatchObject({ sessionId: 'codex-project-session', choice: { provider: 'codex' } });
     expect(calls[2].choice.model).toBe('codex-next-model');
+    expect(calls[2].effort).toBe('xhigh');
     expect(second.events.filter((item) => item.type === 'chat' && item.actor === 'user').map((item) => item.metadata?.target))
       .toEqual(['both', 'codex']);
     expect(projectChatGuidance(second.events, 'codex')).toContain('use the local index');

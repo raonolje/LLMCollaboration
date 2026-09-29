@@ -9,6 +9,7 @@ import type {
   CliStatus,
   CollaborationAPI,
   CollaborationEvent,
+  ChatModelSettings,
   DebateFollowUp,
   EventType,
   ExternalSession,
@@ -42,8 +43,9 @@ import {
   writeJson,
 } from './repository';
 import { conversationContext, importConversationFile, listLocalConversations, readImportedRaw, readImportedTurns } from './conversation-import';
+import { discoverModelCatalog } from './model-catalog';
 
-export type Service = Omit<CollaborationAPI, 'chooseDirectory' | 'chooseCliExecutable' | 'chooseConversationFile' | 'onEvent' | 'openDesktopSession' | 'consumeLaunchRequest' | 'onLaunchRequest' | 'installChatSkills'>;
+export type Service = Omit<CollaborationAPI, 'chooseDirectory' | 'chooseCliExecutable' | 'chooseConversationFile' | 'onEvent' | 'openDesktopSession' | 'consumeLaunchRequest' | 'onLaunchRequest' | 'installChatSkills' | 'checkAppUpdate' | 'downloadAppUpdate'>;
 
 export type ServiceOptions = Readonly<{
   registryPath: string;
@@ -514,18 +516,26 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
 
   const service: Service = {
     listLocalConversations,
-    sendProjectMessage: async (projectPath: string, message: string, target: Provider | 'both', models: Partial<Record<Provider, string>> = {}): Promise<ProjectSnapshot> => {
+    refreshModelCatalogs: async () => Promise.all(providers.map(async (provider) =>
+      discoverModelCatalog(provider, await cliPathFor(provider)))),
+    sendProjectMessage: async (projectPath: string, message: string, target: Provider | 'both', models: Partial<Record<Provider, ChatModelSettings>> = {}): Promise<ProjectSnapshot> => {
       const resolved = path.resolve(projectPath);
       const text = message.trim();
       if (!text || text.length > 20_000) throw new Error('채팅 메시지는 1~20,000자로 입력하세요.');
       if (target !== 'both' && !providers.includes(target)) throw new Error('채팅 대상을 선택하세요.');
-      const selectedModels = Object.fromEntries(providers.map((provider) => [provider, (models?.[provider] ?? '').trim()])) as Record<Provider, string>;
-      if (Object.values(selectedModels).some((model) => model.length > 100 || /[\r\n]/u.test(model))) throw new Error('모델 이름은 줄바꿈 없이 100자 이하로 입력하세요.');
+      const selectedModels = Object.fromEntries(providers.map((provider) => [provider, {
+        model: (models?.[provider]?.model ?? '').trim(), effort: (models?.[provider]?.effort ?? '').trim(),
+      }])) as Record<Provider, ChatModelSettings>;
+      if (Object.values(selectedModels).some(({ model, effort }) => model.length > 100 || /[\r\n]/u.test(model)
+        || (effort && !['low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(effort)))) {
+        throw new Error('모델 이름 또는 추론 수준이 올바르지 않습니다.');
+      }
       const controller = begin(resolved, 'project-chat');
       try {
         const project = await readProject(resolved);
         const userMessage = await event(resolved, project.id, 'chat', 'user', text, undefined, undefined,
-          { target, codexModel: selectedModels.codex || 'default', claudeModel: selectedModels.claude || 'default' });
+          { target, codexModel: selectedModels.codex.model || 'default', claudeModel: selectedModels.claude.model || 'default',
+            codexEffort: selectedModels.codex.effort || 'default', claudeEffort: selectedModels.claude.effort || 'default' });
         const targets = target === 'both' ? providers : [target];
         await Promise.all(targets.map(async (provider) => {
           try {
@@ -547,7 +557,8 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
               .map(async (conversation) => conversationContext(conversation, await readImportedTurns(resolved, conversation.id)))))
               .join('\n\n---\n\n').slice(0, 42_000);
             const result = await trackedModel({
-              projectPath: resolved, cwd: resolved, choice: { provider, model: selectedModels[provider] || 'default' },
+              projectPath: resolved, cwd: resolved, choice: { provider, model: selectedModels[provider].model || 'default' },
+              effort: selectedModels[provider].effort || undefined,
               prompt: [
                 `프로젝트: ${current.project.name}`,
                 `목표: ${current.project.goal}`,
@@ -562,7 +573,8 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
               phase: 'project-chat', readOnly: true, signal: controller.signal,
             }, 'project');
             await event(resolved, project.id, 'chat', provider, result.text, undefined, undefined,
-              { replyTo: userMessage.id, transcript: result.transcript, sessionId: result.sessionId ?? null, model: selectedModels[provider] || 'default' });
+              { replyTo: userMessage.id, transcript: result.transcript, sessionId: result.sessionId ?? null,
+                model: selectedModels[provider].model || 'default', effort: selectedModels[provider].effort || 'default' });
           } catch (error) {
             await event(resolved, project.id, 'error', 'system',
               `${provider === 'codex' ? 'Codex' : 'Claude'} 응답 ${controller.signal.aborted ? '취소됨' : `실패: ${errorText(error)}`}`,

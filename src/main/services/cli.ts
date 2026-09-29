@@ -192,6 +192,7 @@ export type CliRequest = Readonly<{
   prompt: string;
   phase: string;
   readOnly: boolean;
+  effort?: string;
   signal: AbortSignal;
   sessionId?: string;
   configuredPath?: string;
@@ -202,6 +203,17 @@ export type CliResult = Readonly<{
   transcript: string;
   sessionId?: string;
 }>;
+
+export const cliArguments = (request: CliRequest): string[] => {
+  const modelArgs = request.choice.model && request.choice.model !== 'default'
+    ? ['--model', request.choice.model] : [];
+  const effortArgs = request.effort
+    ? request.choice.provider === 'codex' ? ['--config', `model_reasoning_effort="${request.effort}"`] : ['--effort', request.effort]
+    : [];
+  return request.choice.provider === 'codex'
+    ? ['exec', '--json', '--cd', request.cwd, '--sandbox', request.readOnly ? 'read-only' : 'workspace-write', ...modelArgs, ...effortArgs, ...(request.sessionId ? ['resume', request.sessionId, '-'] : ['-'])]
+    : ['-p', '--verbose', '--output-format', 'stream-json', '--permission-mode', request.readOnly ? 'plan' : 'acceptEdits', '--permission-prompts', 'none', '--tools', request.readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash', ...modelArgs, ...effortArgs, ...(request.sessionId ? ['--resume', request.sessionId] : []), 'Follow the full task instructions supplied on standard input.'];
+};
 
 const isSessionId = (value: unknown): value is string =>
   typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value);
@@ -245,14 +257,9 @@ export const runCli = async (request: CliRequest): Promise<CliResult> => {
   const output = path.join(request.projectPath, relative);
   await mkdir(projectFiles(request.projectPath).runs, { recursive: true });
   const log = createWriteStream(output, { encoding: 'utf8', flags: 'wx' });
-  log.write(`${JSON.stringify({ type: 'invocation', timestamp: new Date().toISOString(), provider: request.choice.provider, model: request.choice.model, phase: request.phase, prompt: request.prompt, cwd: request.cwd, sessionId: request.sessionId })}\n`);
+  log.write(`${JSON.stringify({ type: 'invocation', timestamp: new Date().toISOString(), provider: request.choice.provider, model: request.choice.model, effort: request.effort, phase: request.phase, prompt: request.prompt, cwd: request.cwd, sessionId: request.sessionId })}\n`);
 
-  const modelArgs = request.choice.model && request.choice.model !== 'default'
-    ? ['--model', request.choice.model]
-    : [];
-  const args = request.choice.provider === 'codex'
-    ? ['exec', '--json', '--cd', request.cwd, '--sandbox', request.readOnly ? 'read-only' : 'workspace-write', ...modelArgs, ...(request.sessionId ? ['resume', request.sessionId, '-'] : ['-'])]
-    : ['-p', '--verbose', '--output-format', 'stream-json', '--permission-mode', request.readOnly ? 'plan' : 'acceptEdits', '--permission-prompts', 'none', '--tools', request.readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash', ...modelArgs, ...(request.sessionId ? ['--resume', request.sessionId] : []), 'Follow the full task instructions supplied on standard input.'];
+  const args = cliArguments(request);
 
   const spawnCli = isWindowsShim(executable) ? crossSpawn : spawn;
   const child = spawnCli(executable, args, {
