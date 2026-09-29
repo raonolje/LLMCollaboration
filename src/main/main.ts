@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron';
 import path from 'node:path';
-import type { CollaborationEvent } from '../shared/types';
+import type { CollaborationEvent, Provider } from '../shared/types';
 import { createService } from './services';
 
 let mainWindow: BrowserWindow | null = null;
@@ -82,15 +82,20 @@ const registerHandlers = (): void => {
   ipcMain.handle('collab:cancelRun', (_event, projectPath, taskId) => service.cancelRun(projectPath, taskId));
   ipcMain.handle('collab:search', (_event, projectPath, query) => service.search(projectPath, query));
   ipcMain.handle('collab:readTranscript', (_event, projectPath, transcript) => service.readTranscript(projectPath, transcript));
+  ipcMain.handle('collab:readSessionHistory', (_event, projectPath, sessionId) => service.readSessionHistory(projectPath, sessionId));
   ipcMain.handle('collab:openSession', (_event, projectPath, sessionId) => service.openSession(projectPath, sessionId));
-  ipcMain.handle('collab:openCodexDesktopSession', async (_event, projectPath, sessionId) => {
+  ipcMain.handle('collab:openDesktopSession', async (_event, projectPath, sessionId, provider: Provider) => {
+    if (provider !== 'codex' && provider !== 'claude') throw new Error('지원하지 않는 모델입니다.');
     const current = await service.openProject(projectPath);
     const session = [
       ...(current.project.sessions ?? []),
       ...current.tasks.flatMap((task) => task.sessions ?? []),
-    ].find((item) => item.sessionId === sessionId && item.hostId === current.localHostId && item.provider === 'codex');
-    if (!session) throw new Error('이 컴퓨터의 Codex 대화 세션을 찾을 수 없습니다.');
-    await shell.openExternal(`codex://threads/${session.sessionId}`);
+    ].find((item) => item.sessionId === sessionId && item.hostId === current.localHostId && item.provider === provider);
+    if (!session) throw new Error('이 컴퓨터의 모델 대화 세션을 찾을 수 없습니다.');
+    const url = provider === 'codex'
+      ? `codex://threads/${encodeURIComponent(session.sessionId)}`
+      : `claude://resume?session=${encodeURIComponent(session.sessionId)}`;
+    await shell.openExternal(url);
   });
 };
 

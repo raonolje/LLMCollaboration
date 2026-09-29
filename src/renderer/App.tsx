@@ -10,6 +10,7 @@ import type {
   ProjectInput,
   ProjectSnapshot,
   Provider,
+  SessionTurn,
   Task,
   TaskInput,
   TaskStatus,
@@ -18,7 +19,7 @@ import appIcon from '../../assets/icon.svg?url';
 import './styles.css';
 
 type Tab = 'overview' | 'tasks' | 'debate' | 'history';
-type Dialog = 'project' | 'task' | 'transcript' | null;
+type Dialog = 'project' | 'task' | 'transcript' | 'session-history' | null;
 
 const statusLabel: Record<TaskStatus, string> = {
   draft: '초안',
@@ -83,12 +84,12 @@ function Empty({ icon, title, detail }: { icon: string; title: string; detail: s
   return <div className="empty"><div className="empty-icon">{icon}</div><strong>{title}</strong><span>{detail}</span></div>;
 }
 
-function SessionCard({ session, localHostId, onOpen, onOpenCodex }: { session: ExternalSession; localHostId: string; onOpen: (session: ExternalSession) => void; onOpenCodex: (session: ExternalSession) => void }) {
+function SessionCard({ session, localHostId, onOpen, onOpenDesktop, onHistory }: { session: ExternalSession; localHostId: string; onOpen: (session: ExternalSession) => void; onOpenDesktop: (session: ExternalSession) => void; onHistory: (session: ExternalSession) => void }) {
   const isLocal = session.hostId === localHostId;
   return <div className={'session-card ' + session.provider}>
     <div className="session-card-head"><span className={'model-chip ' + session.provider}>{providerLabel(session.provider)}</span><span className="badge neutral">{sessionPurposeLabel[session.purpose]}</span>{!isLocal && <span className="badge warning">다른 컴퓨터</span>}<span className="activity-time">{shortTime(session.updatedAt)}</span></div>
     <div className="session-id" title={session.sessionId}>{session.sessionId}</div>
-    <div className="session-actions"><button className="button small" type="button" disabled={!isLocal} onClick={() => onOpen(session)}>{isLocal ? 'CLI에서 이어 열기 ↗' : '이 컴퓨터에서 열 수 없음'}</button>{session.provider === 'codex' && <button className="button small" type="button" disabled={!isLocal} onClick={() => onOpenCodex(session)}>Codex 앱에서 보기 ↗</button>}</div>
+    <div className="session-actions"><button className="button small" type="button" onClick={() => onHistory(session)}>저장된 대화 보기</button><button className="button small" type="button" disabled={!isLocal} onClick={() => onOpen(session)}>{isLocal ? 'CLI에서 이어 열기 ↗' : '이 컴퓨터에서 열 수 없음'}</button><button className="button small" type="button" disabled={!isLocal} onClick={() => onOpenDesktop(session)} title={session.provider === 'claude' ? 'CLI 대화를 Claude Code 데스크톱으로 가져옵니다. 이후 두 대화는 자동 동기화되지 않을 수 있습니다.' : undefined}>{session.provider === 'codex' ? 'Codex 앱에서 보기 ↗' : 'Claude Code 앱으로 가져오기 ↗'}</button></div>
   </div>;
 }
 
@@ -113,6 +114,7 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<CollaborationEvent[] | null>(null);
   const [transcriptView, setTranscriptView] = useState<{ path: string; content: string } | null>(null);
+  const [sessionHistory, setSessionHistory] = useState<{ session: ExternalSession; turns: SessionTurn[] } | null>(null);
   const [planRequest, setPlanRequest] = useState('');
   const [runningTaskIds, setRunningTaskIds] = useState<ReadonlySet<string>>(() => new Set());
   const [cancelBusy, setCancelBusy] = useState(false);
@@ -407,6 +409,15 @@ export default function App() {
     });
   };
 
+  const viewSessionHistory = (session: ExternalSession): void => {
+    if (!project) return;
+    void perform('저장된 대화를 읽는 중', async () => {
+      const turns = await window.collab.readSessionHistory(project.path, session.sessionId);
+      setSessionHistory({ session, turns });
+      setDialog('session-history');
+    });
+  };
+
   const openSession = (session: ExternalSession): void => {
     if (!project) return;
     if (session.hostId !== snapshot?.localHostId) return notify('다른 컴퓨터에서 만든 CLI 채팅은 해당 컴퓨터에서 열 수 있습니다.', true);
@@ -416,12 +427,13 @@ export default function App() {
     });
   };
 
-  const openCodexDesktopSession = (session: ExternalSession): void => {
-    if (!project || session.provider !== 'codex') return;
-    if (session.hostId !== snapshot?.localHostId) return notify('다른 컴퓨터에서 만든 Codex 채팅은 해당 컴퓨터에서 열 수 있습니다.', true);
-    void perform('Codex 앱에서 채팅을 여는 중', async () => {
-      await window.collab.openCodexDesktopSession(project.path, session.sessionId);
-      notify('Codex 앱에서 채팅을 열었습니다.');
+  const openDesktopSession = (session: ExternalSession): void => {
+    if (!project) return;
+    if (session.hostId !== snapshot?.localHostId) return notify('다른 컴퓨터에서 만든 채팅은 해당 컴퓨터에서 열 수 있습니다.', true);
+    const appName = session.provider === 'codex' ? 'Codex' : 'Claude Code';
+    void perform(`${appName} 앱에서 채팅을 여는 중`, async () => {
+      await window.collab.openDesktopSession(project.path, session.sessionId, session.provider);
+      notify(`${appName} 앱에 채팅을 열도록 요청했습니다.`);
     });
   };
 
@@ -441,7 +453,7 @@ export default function App() {
       </div>
       <div className="panel panel-pad">
         <div className="panel-head"><div><h2>프로젝트 모델 채팅</h2><p className="subtle">이 컴퓨터에서 만든 CLI 채팅은 이어 열 수 있습니다. 다른 컴퓨터의 기록도 함께 보존됩니다.</p></div><span className="badge neutral">{project?.sessions?.length ?? 0}개 기록</span></div>
-        {project?.sessions?.length ? <div className="session-grid">{project.sessions.map((session) => <SessionCard key={`${session.hostId}:${session.sessionId}`} session={session} localHostId={snapshot?.localHostId ?? ''} onOpen={openSession} onOpenCodex={openCodexDesktopSession} />)}</div>
+        {project?.sessions?.length ? <div className="session-grid">{project.sessions.map((session) => <SessionCard key={`${session.hostId}:${session.sessionId}`} session={session} localHostId={snapshot?.localHostId ?? ''} onOpen={openSession} onOpenDesktop={openDesktopSession} onHistory={viewSessionHistory} />)}</div>
           : <div className="session-empty">CLI 채팅이 아직 없습니다. CLI 로그인 상태와 전체 이력의 오류를 확인한 뒤 새로고침해 다시 시도하세요.</div>}
       </div>
       <div className="grid two">
@@ -506,7 +518,7 @@ export default function App() {
                 {task.dependsOn.length > 0 && <span>선행 업무 {task.dependsOn.length}개</span>}
               </div>
               <div className="model-pair" style={{ marginTop: 9 }}><ModelChip choice={task.executor} /><span>실행 → 검수</span><ModelChip choice={task.reviewer} /></div>
-              {!!task.sessions?.length && <details className="task-sessions"><summary>별도 CLI 채팅 {task.sessions.length}개</summary><div className="session-grid">{task.sessions.map((session) => <SessionCard key={`${session.hostId}:${session.sessionId}`} session={session} localHostId={snapshot?.localHostId ?? ''} onOpen={openSession} onOpenCodex={openCodexDesktopSession} />)}</div></details>}
+              {!!task.sessions?.length && <details className="task-sessions"><summary>별도 CLI 채팅 {task.sessions.length}개</summary><div className="session-grid">{task.sessions.map((session) => <SessionCard key={`${session.hostId}:${session.sessionId}`} session={session} localHostId={snapshot?.localHostId ?? ''} onOpen={openSession} onOpenDesktop={openDesktopSession} onHistory={viewSessionHistory} />)}</div></details>}
               {task.reviewSummary && <p className="subtle" style={{ marginTop: 8 }}>검수: {task.reviewSummary.slice(0, 150)}</p>}
             </div>
             <div className="task-controls">
@@ -625,6 +637,7 @@ export default function App() {
       {tasks.filter((task) => task.id !== editingTask?.id).length > 0 && <div className="field"><label>선행 업무</label><div className="dependency-list">{tasks.filter((task) => task.id !== editingTask?.id).map((task) => <label className="dependency-item" key={task.id}><input type="checkbox" checked={taskDraft.dependsOn.includes(task.id)} onChange={(event) => setTaskDraft((previous) => ({ ...previous, dependsOn: event.target.checked ? [...previous.dependsOn, task.id] : previous.dependsOn.filter((id) => id !== task.id) }))} /><span>{task.title}</span></label>)}</div></div>}
       <div className="form-actions"><button className="button" type="button" onClick={() => setDialog(null)}>취소</button><button className="button primary" type="submit" disabled={!!busy}>저장</button></div>
     </form></div></div>}
+    {dialog === 'session-history' && sessionHistory && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setDialog(null)}><div className="modal session-history-modal" role="dialog" aria-modal="true" aria-label="저장된 모델 대화"><div className="modal-header"><div><h2>{providerLabel(sessionHistory.session.provider)} 저장된 대화</h2><p className="subtle">{sessionHistory.session.sessionId}</p></div><button className="close" aria-label="닫기" onClick={() => setDialog(null)}>×</button></div><div className="modal-body"><p className="subtle session-history-note">프로젝트 Git에 저장된 기록입니다. CLI나 데스크톱 앱 연결 없이 볼 수 있습니다.</p>{sessionHistory.turns.length ? sessionHistory.turns.map(({ event, prompt }) => <article className="session-turn" key={event.id}><div className="session-turn-head"><span className="badge neutral">{eventLabel[event.type]}</span><span className="activity-time">{shortTime(event.timestamp)}</span>{event.metadata?.transcript && <button className="button ghost small" type="button" onClick={() => openTranscript(event)}>CLI 원문</button>}</div>{prompt && <details className="session-prompt"><summary>모델에 전달한 요청</summary><pre>{prompt}</pre></details>}<div className="session-response">{event.message}</div></article>) : <Empty icon="◎" title="저장된 응답이 없습니다" detail="해당 세션의 작업 이력이 기록되면 이곳에 표시됩니다." />}</div></div></div>}
     {dialog === 'transcript' && transcriptView && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setDialog(null)}><div className="modal transcript-modal" role="dialog" aria-modal="true" aria-label="CLI 원문 기록"><div className="modal-header"><div><h2>CLI 원문 기록</h2><p className="subtle">{transcriptView.path}</p></div><button className="close" aria-label="닫기" onClick={() => setDialog(null)}>×</button></div><div className="modal-body"><pre className="transcript-content">{transcriptView.content}</pre></div></div></div>}
   </div>;
 }

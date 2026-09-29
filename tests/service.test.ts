@@ -194,6 +194,16 @@ describe('service orchestration with an injected model', () => {
         ['claude', sessionIds['project:claude']],
         ['codex', sessionIds['project:codex']],
       ]);
+    const offlineReader = createService({
+      registryPath: path.join(workspace, 'another-user', 'registry.json'),
+      emit: () => undefined,
+      runModel,
+      autoStartSessions: false,
+    });
+    expect(await offlineReader.readSessionHistory(projectPath, sessionIds['project:claude'])).toMatchObject([
+      { event: { message: 'claude project-kickoff answer' }, prompt: expect.stringContaining('프로젝트 Session project') },
+    ]);
+    await expect(offlineReader.readSessionHistory(projectPath, randomUUID())).rejects.toThrow('세션을 찾을 수 없습니다');
 
     await service.createProject({ path: projectPath, name: 'Session project', goal: 'Keep model conversations' });
     expect(calls.filter(({ phase }) => phase === 'project-kickoff')).toHaveLength(2);

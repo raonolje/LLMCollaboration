@@ -15,6 +15,11 @@ export type ExternalSession = Readonly<{
   updatedAt: string;
 }>;
 
+export type SessionTurn = Readonly<{
+  event: CollaborationEvent;
+  prompt: string;
+}>;
+
 export type TaskStatus =
   | 'draft'
   | 'debating'
@@ -141,8 +146,9 @@ export type CollaborationAPI = Readonly<{
   cancelRun: (projectPath: string, taskId: string) => Promise<void>;
   search: (projectPath: string, query: string) => Promise<CollaborationEvent[]>;
   readTranscript: (projectPath: string, transcript: string) => Promise<string>;
+  readSessionHistory: (projectPath: string, sessionId: string) => Promise<SessionTurn[]>;
   openSession: (projectPath: string, sessionId: string) => Promise<void>;
-  openCodexDesktopSession: (projectPath: string, sessionId: string) => Promise<void>;
+  openDesktopSession: (projectPath: string, sessionId: string, provider: Provider) => Promise<void>;
   onEvent: (listener: (event: CollaborationEvent) => void) => () => void;
 }>;
 

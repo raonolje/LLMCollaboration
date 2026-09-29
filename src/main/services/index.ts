@@ -16,6 +16,7 @@ import type {
   ProjectInput,
   ProjectSnapshot,
   Provider,
+  SessionTurn,
   Task,
   TaskInput,
   TaskStatus,
@@ -38,7 +39,7 @@ import {
   writeJson,
 } from './repository';
 
-export type Service = Omit<CollaborationAPI, 'chooseDirectory' | 'chooseCliExecutable' | 'onEvent' | 'openCodexDesktopSession'>;
+export type Service = Omit<CollaborationAPI, 'chooseDirectory' | 'chooseCliExecutable' | 'onEvent' | 'openDesktopSession'>;
 
 export type ServiceOptions = Readonly<{
   registryPath: string;
@@ -158,6 +159,39 @@ const searchRun = async (
     reader.once('error', reject);
   });
   return matches;
+};
+
+const resolveRunTranscript = async (projectPath: string, transcript: string): Promise<string> => {
+  const projectRoot = await realpath(path.resolve(projectPath));
+  const runs = await realpath(projectFiles(path.resolve(projectPath)).runs);
+  const candidate = await realpath(path.resolve(projectPath, transcript));
+  const runsInsideProject = path.relative(projectRoot, runs);
+  const relative = path.relative(runs, candidate);
+  if (!runsInsideProject || runsInsideProject.startsWith('..') || path.isAbsolute(runsInsideProject)
+    || !relative || relative.startsWith('..') || path.isAbsolute(relative) || !relative.endsWith('.jsonl')) {
+    throw new Error('프로젝트 실행 기록 폴더의 JSONL 파일만 열 수 있습니다.');
+  }
+  return candidate;
+};
+
+const readInvocationPrompt = async (filename: string): Promise<string> => {
+  const stream = createReadStream(filename, { encoding: 'utf8' });
+  const reader = createInterface({ input: stream, crlfDelay: Infinity });
+  try {
+    const firstLine = await new Promise<string>((resolve, reject) => {
+      reader.once('line', resolve);
+      reader.once('close', () => resolve(''));
+      reader.once('error', reject);
+      stream.once('error', reject);
+    });
+    const invocation = JSON.parse(firstLine) as { type?: string; prompt?: unknown };
+    return invocation.type === 'invocation' && typeof invocation.prompt === 'string' ? invocation.prompt : '';
+  } catch {
+    return '';
+  } finally {
+    reader.close();
+    stream.destroy();
+  }
 };
 
 export const createService = ({ registryPath, emit, runModel = runCli, autoStartSessions = true }: ServiceOptions): Service => {
@@ -736,16 +770,24 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
     },
 
     readTranscript: async (projectPath: string, transcript: string): Promise<string> => {
-      const projectRoot = await realpath(path.resolve(projectPath));
-      const runs = await realpath(projectFiles(path.resolve(projectPath)).runs);
-      const candidate = await realpath(path.resolve(projectPath, transcript));
-      const runsInsideProject = path.relative(projectRoot, runs);
-      const relative = path.relative(runs, candidate);
-      if (!runsInsideProject || runsInsideProject.startsWith('..') || path.isAbsolute(runsInsideProject)
-        || !relative || relative.startsWith('..') || path.isAbsolute(relative) || !relative.endsWith('.jsonl')) {
-        throw new Error('프로젝트 실행 기록 폴더의 JSONL 파일만 열 수 있습니다.');
-      }
-      return readFile(candidate, 'utf8');
+      return readFile(await resolveRunTranscript(projectPath, transcript), 'utf8');
+    },
+
+    readSessionHistory: async (projectPath: string, sessionId: string): Promise<SessionTurn[]> => {
+      const current = await snapshot(path.resolve(projectPath));
+      const session = [
+        ...(current.project.sessions ?? []),
+        ...current.tasks.flatMap((task) => task.sessions ?? []),
+      ].find((item) => item.sessionId === sessionId);
+      if (!session) throw new Error('프로젝트에 기록된 대화 세션을 찾을 수 없습니다.');
+      const recorded = current.events.filter((record) => record.actor === session.provider && record.metadata?.sessionId === sessionId);
+      return Promise.all(recorded.map(async (record) => {
+        const transcript = record.metadata?.transcript;
+        const prompt = typeof transcript === 'string'
+          ? await resolveRunTranscript(projectPath, transcript).then(readInvocationPrompt).catch(() => '')
+          : '';
+        return { event: record, prompt };
+      }));
     },
 
     openSession: async (projectPath: string, sessionId: string): Promise<void> => {
