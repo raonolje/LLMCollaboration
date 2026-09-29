@@ -33,7 +33,10 @@ const latestRelease = async (): Promise<LatestRelease> => {
 const assetFor = (release: LatestRelease, platform: NodeJS.Platform, architecture: string, portable: boolean): ReleaseAsset | undefined => {
   const version = release.tag_name.replace(/^v/u, '');
   const candidates = release.assets.filter((asset) => platform === 'win32'
-    ? asset.name === `LLM Collaboration ${portable ? '' : 'Setup '}${version}.exe`
+    ? [
+      `LLM Collaboration ${portable ? '' : 'Setup '}${version}.exe`,
+      `LLM.Collaboration.${portable ? '' : 'Setup.'}${version}.exe`,
+    ].includes(asset.name)
     : platform === 'darwin' && /\.dmg$/iu.test(asset.name));
   return platform === 'darwin'
     ? candidates.find((asset) => asset.name.includes(architecture)) ?? candidates[0]
