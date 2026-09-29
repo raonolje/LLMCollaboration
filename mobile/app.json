@@ -1,0 +1,18 @@
+{
+  "expo": {
+    "name": "LLM Collaboration",
+    "slug": "llm-collaboration",
+    "scheme": "llmcollaboration-mobile",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "bundleIdentifier": "me.raonolje.llmcollaboration.mobile",
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSAppTransportSecurity": { "NSAllowsArbitraryLoads": true }
+      }
+    }
+  }
+}

@@ -29,6 +29,12 @@ export type AppUpdateCheck = Readonly<{
   releaseUrl: string;
   assetName?: string;
 }>;
+export type RemoteStatus = Readonly<{
+  enabled: boolean;
+  url?: string;
+  token?: string;
+  error?: string;
+}>;
 
 export type ExternalSession = Readonly<{
   hostId: string;
@@ -187,6 +193,9 @@ export type CollaborationAPI = Readonly<{
   refreshModelCatalogs: () => Promise<ModelCatalog[]>;
   checkAppUpdate: () => Promise<AppUpdateCheck>;
   downloadAppUpdate: () => Promise<string>;
+  remoteStatus: () => Promise<RemoteStatus>;
+  setRemoteEnabled: (enabled: boolean) => Promise<RemoteStatus>;
+  rotateRemoteToken: () => Promise<RemoteStatus>;
   createProject: (input: ProjectInput) => Promise<ProjectSnapshot>;
   sendProjectMessage: (projectPath: string, message: string, target: Provider | 'both', models: Partial<Record<Provider, ChatModelSettings>>) => Promise<ProjectSnapshot>;
   cancelProjectMessage: (projectPath: string) => Promise<void>;

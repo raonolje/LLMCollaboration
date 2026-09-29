@@ -58,6 +58,20 @@ npm run package:mac  # macOS: DMG와 ZIP
 
 앱 아이콘의 원본은 `assets/icon.svg`입니다. `npm run icons:png`는 원본에서 `assets/icon.png`를 다시 만들며, 앱 창과 패키지 리소스에 이 PNG를 사용합니다. Windows 패키지에는 `assets/icon.ico`, macOS 패키지에는 `assets/icon.icns`를 사용합니다. ICO·ICNS는 저장소에 포함돼 있으며 `icons:png` 명령으로는 재생성되지 않습니다. 세 형식을 모두 갱신하려면 PNG 생성 뒤 Pillow가 설치된 Python 환경에서 `python scripts/build-icons.py`를 실행하세요.
 
+## iPhone 원격 연결
+
+데스크톱 앱 상단 **아이폰 원격 연결**에서 원격 연결을 켭니다. Windows 또는 macOS PC와 iPhone에 [Tailscale](https://tailscale.com/download)을 설치하고 같은 tailnet에 로그인해야 합니다. 앱이 Tailscale 네트워크 인터페이스에만 서버를 열고, 주소(`http://100.x.y.z:48721`)와 임의 생성한 연결 코드를 표시합니다. 인터넷 공유기 포트 개방이나 별도 LLM API 키는 필요하지 않습니다. 데스크톱 앱과 PC가 켜져 있어야 원격 작업을 실행할 수 있습니다.
+
+아이폰 앱 소스는 `mobile/`에 있습니다. 개발 중 실기기 확인은 다음 명령으로 Expo를 실행하고 iPhone의 Expo Go로 열 수 있습니다. [Expo 개발 안내](https://docs.expo.dev/get-started/start-developing/)에 따라 물리적 iPhone에서는 Expo CLI와 Expo Go를 같은 Expo 계정으로 로그인해야 합니다. 정식 독립 앱의 TestFlight·App Store 배포에는 Apple 개발자 계정과 iOS 코드 서명이 필요합니다. 이 저장소에는 아직 서명된 IPA가 없습니다.
+
+```sh
+cd mobile
+npm ci
+npx expo start
+```
+
+아이폰 앱에 데스크톱 화면의 주소와 연결 코드를 입력하면 프로젝트 목록, Codex·Claude 대화, 업무 상태를 읽을 수 있습니다. 양쪽 또는 한 모델에 메시지를 보내고, 실제 모델 목록과 추론 수준을 선택하며, 업무 계획·토론·실행·중단·추가 토론을 요청할 수 있습니다. 아이폰은 5초마다 진행 상황을 갱신합니다. 연결 코드는 iPhone SecureStore에 보관하고, 프로젝트 기록과 CLI 로그인은 데스크톱에 남습니다. 코드를 재발급하면 이전 iPhone 연결은 즉시 거부됩니다. 분실 시 데스크톱의 **원격 연결 끄기** 또는 **코드 재발급**을 사용하세요. Tailscale 내부 HTTP 연결을 사용하며 iOS 전송 보안 예외가 설정돼 있습니다. 이 주소를 공용 인터넷에 포트 포워딩하지 마세요.
+
 ## 사용 흐름
 
 1. **프로젝트 폴더 지정:** 새 프로젝트에서 이름, 목표, 절대 경로를 입력합니다. 앱은 그 폴더를 Git 저장소로 사용하고 앱 전용 기록을 `.llm-collaboration/`에 저장합니다. Codex·Claude 구독 로그인이 준비돼 있으면 두 CLI에 프로젝트 시작 대화를 만들고 ID를 기록합니다. 생성에 실패해도 프로젝트는 유지되고 오류가 이력에 남습니다. 다른 컴퓨터에서 기록이 담긴 저장소를 클론했다면 같은 폴더를 지정해 기존 프로젝트를 다시 등록할 수 있습니다.

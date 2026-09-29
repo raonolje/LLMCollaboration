@@ -1,0 +1,35 @@
+import * as SecureStore from 'expo-secure-store';
+
+export type Provider = 'codex' | 'claude';
+export type Target = Provider | 'both';
+export type Project = { id: string; name: string; goal: string; path: string; defaultDebateRounds: number };
+export type Event = { id: string; actor: Provider | 'user' | 'system'; type: string; message: string; timestamp: string; taskId?: string; metadata?: Record<string, string> };
+export type Task = { id: string; title: string; description: string; status: string; executor: { provider: Provider; model: string }; reviewer: { provider: Provider; model: string }; debateRounds: number };
+export type Snapshot = { project: Project; tasks: Task[]; events: Event[] };
+export type Catalog = { provider: Provider; models: { id: string; label: string; efforts: string[]; defaultEffort?: string; requiresCredits?: boolean }[] };
+export type Connection = { url: string; token: string };
+const storageKey = 'llm-collaboration-connection';
+
+export const loadConnection = async (): Promise<Connection | null> => {
+  const saved = await SecureStore.getItemAsync(storageKey);
+  return saved ? JSON.parse(saved) as Connection : null;
+};
+export const saveConnection = async (connection: Connection | null): Promise<void> => {
+  if (connection) await SecureStore.setItemAsync(storageKey, JSON.stringify(connection));
+  else await SecureStore.deleteItemAsync(storageKey);
+};
+export const request = async <T>(connection: Connection, route: string, body?: unknown): Promise<T> => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+  try {
+    const response = await fetch(`${connection.url.replace(/\/$/u, '')}/v1${route}`, {
+      method: body === undefined ? 'GET' : 'POST',
+      headers: { Authorization: `Bearer ${connection.token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: controller.signal,
+    });
+    const result = await response.json() as T & { error?: string };
+    if (!response.ok) throw new Error(result.error ?? `연결 오류 (${response.status})`);
+    return result;
+  } finally { clearTimeout(timeout); }
+};

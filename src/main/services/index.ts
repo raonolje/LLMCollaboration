@@ -45,7 +45,7 @@ import {
 import { conversationContext, importConversationFile, listLocalConversations, readImportedRaw, readImportedTurns } from './conversation-import';
 import { discoverModelCatalog } from './model-catalog';
 
-export type Service = Omit<CollaborationAPI, 'chooseDirectory' | 'chooseCliExecutable' | 'chooseConversationFile' | 'onEvent' | 'openDesktopSession' | 'consumeLaunchRequest' | 'onLaunchRequest' | 'installChatSkills' | 'checkAppUpdate' | 'downloadAppUpdate'>;
+export type Service = Omit<CollaborationAPI, 'chooseDirectory' | 'chooseCliExecutable' | 'chooseConversationFile' | 'onEvent' | 'openDesktopSession' | 'consumeLaunchRequest' | 'onLaunchRequest' | 'installChatSkills' | 'checkAppUpdate' | 'downloadAppUpdate' | 'remoteStatus' | 'setRemoteEnabled' | 'rotateRemoteToken'> & { listProjects: () => Promise<Project[]> };
 
 export type ServiceOptions = Readonly<{
   registryPath: string;
@@ -519,6 +519,10 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
   };
 
   const service: Service = {
+    listProjects: async (): Promise<Project[]> => (await Promise.allSettled((await readRegisteredPaths())
+      .map(async (projectPath) => ({ ...await readProject(projectPath), path: path.resolve(projectPath) }))))
+      .filter((result): result is PromiseFulfilledResult<Project> => result.status === 'fulfilled')
+      .map((result) => result.value),
     listLocalConversations,
     refreshModelCatalogs: async () => Promise.all(providers.map(async (provider) =>
       discoverModelCatalog(provider, await cliPathFor(provider)))),

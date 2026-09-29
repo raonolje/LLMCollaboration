@@ -5,8 +5,10 @@ import { createService } from './services';
 import { installChatSkills, parseLaunchUrl } from './chat-link';
 import { recycleDirectoryWithWindows } from './windows-recycle';
 import { checkAppUpdate, downloadAppUpdate, launchDownloadedUpdate } from './updater';
+import { createRemote } from './remote';
 
 let mainWindow: BrowserWindow | null = null;
+let closeRemote: (() => Promise<void>) | null = null;
 const trashItemWithFallback = async (target: string): Promise<void> => {
   try { await shell.trashItem(target); }
   catch (error) {
@@ -69,6 +71,9 @@ const registerHandlers = (): void => {
     emit: (event: CollaborationEvent) => mainWindow?.webContents.send('collab:event', event),
     trashItem: trashItemWithFallback,
   });
+  const remote = createRemote(service, app.getPath('userData'));
+  closeRemote = remote.close;
+  void remote.initialize();
 
   ipcMain.handle('collab:bootstrap', () => service.bootstrap());
   ipcMain.handle('collab:chooseDirectory', async () => {
@@ -104,6 +109,9 @@ const registerHandlers = (): void => {
   ipcMain.handle('collab:setCliExecutable', (_event, provider, filePath) => service.setCliExecutable(provider, filePath));
   ipcMain.handle('collab:refreshCliStatus', () => service.refreshCliStatus());
   ipcMain.handle('collab:refreshModelCatalogs', () => service.refreshModelCatalogs());
+  ipcMain.handle('collab:remoteStatus', () => remote.status());
+  ipcMain.handle('collab:setRemoteEnabled', (_event, enabled: boolean) => remote.setEnabled(enabled));
+  ipcMain.handle('collab:rotateRemoteToken', () => remote.rotateToken());
   ipcMain.handle('collab:checkAppUpdate', () => checkAppUpdate(app.getVersion(), process.platform, process.arch, !!process.env.PORTABLE_EXECUTABLE_FILE));
   ipcMain.handle('collab:downloadAppUpdate', async () => {
     const downloaded = await downloadAppUpdate(app.getVersion(), process.platform, process.arch,
@@ -171,3 +179,4 @@ void app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+app.on('before-quit', () => { void closeRemote?.(); });

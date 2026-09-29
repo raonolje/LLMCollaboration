@@ -1,6 +1,6 @@
 {
   "name": "llm-collaboration",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "private": true,
   "description": "구독형 CLI 기반 로컬 LLM 협업 앱",
   "main": "dist-electron/main/main.js",
@@ -12,8 +12,8 @@
     "test": "vitest run",
     "icons:png": "node scripts/build-icons.mjs",
     "start": "electron .",
-    "package:win": "npm run build && electron-builder --win",
-    "package:mac": "npm run build && electron-builder --mac"
+    "package:win": "npm run build && electron-builder --win --publish never",
+    "package:mac": "npm run build && electron-builder --mac --publish never"
   },
   "dependencies": {
     "cross-spawn": "^7.0.6",

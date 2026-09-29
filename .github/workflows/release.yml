@@ -9,6 +9,22 @@ permissions:
   contents: write
 
 jobs:
+  mobile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - run: npm ci
+        working-directory: mobile
+      - run: npm run typecheck
+        working-directory: mobile
+      - run: npx expo export --platform ios --output-dir export
+        working-directory: mobile
+
   build:
     strategy:
       fail-fast: false
@@ -43,7 +59,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: build
+    needs: [build, mobile]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
