@@ -94,6 +94,28 @@ describe('service orchestration with an injected model', () => {
     expect(taskCard(second.project, task, second.events, 'claude')).not.toContain('use the local index');
   }), 30_000);
 
+  it('starts a new Codex chat when another app is writing the saved session', () => withTemporaryWorkspace(async (workspace) => {
+    const projectPath = path.join(workspace, 'project');
+    const calls: CliRequest[] = [];
+    const service = createService({
+      registryPath: path.join(workspace, 'registry.json'), emit: () => undefined, autoStartSessions: false,
+      runModel: async (request) => {
+        calls.push(request);
+        if (request.sessionId === 'old-session') throw new Error('thread-store conflict: thread already has an active writer');
+        return { ...await recordMockTranscript(request, 'Codex response'),
+          sessionId: request.sessionId ?? (calls.length === 1 ? 'old-session' : 'new-session') };
+      },
+    });
+    await service.createProject({ path: projectPath, name: 'Shared project', goal: 'Continue the work' });
+    await service.sendProjectMessage(projectPath, 'First direction', 'codex');
+    const next = await service.sendProjectMessage(projectPath, 'Continue from the prior work', 'codex');
+    expect(calls.map((call) => call.sessionId)).toEqual([undefined, 'old-session', undefined]);
+    expect(calls[2].prompt).toContain('기존 Codex 채팅이 다른 앱에서 사용 중');
+    expect(next.project.sessions?.at(-1)?.sessionId).toBe('new-session');
+    expect(next.events.some((item) => item.type === 'system' && item.message.includes('새 CLI 채팅'))).toBe(true);
+    expect(next.events.filter((item) => item.actor === 'codex' && item.type === 'chat')).toHaveLength(2);
+  }), 30_000);
+
   it('runs two debate rounds, accepts a targeted follow-up, gets a second-model review, and merges approved work', () => withTemporaryWorkspace(async (workspace) => {
     const projectPath = path.join(workspace, 'project');
     const calls: CliRequest[] = [];

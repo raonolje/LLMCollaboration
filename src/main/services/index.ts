@@ -408,7 +408,7 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
     request: CliRequest,
     purpose: ExternalSession['purpose'],
     taskId?: string,
-  ): Promise<CliResult> => {
+  ): Promise<CliResult> => withLock(`model-session:${request.projectPath}:${purpose}:${taskId ?? 'project'}:${request.choice.provider}`, async () => {
     const current = await snapshot(request.projectPath);
     const hostId = current.localHostId;
     const sessions = taskId
@@ -417,8 +417,20 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
     const previous = sessions.filter((session) =>
       session.hostId === hostId && session.provider === request.choice.provider && session.purpose === purpose,
     ).at(-1);
-    const result = await runModel({ ...request, sessionId: previous?.sessionId,
-      configuredPath: await cliPathFor(request.choice.provider) });
+    const configuredPath = await cliPathFor(request.choice.provider);
+    let restarted = false;
+    const result = await runModel({ ...request, sessionId: previous?.sessionId, configuredPath })
+      .catch(async (error: unknown) => {
+        if (request.choice.provider !== 'codex' || !previous?.sessionId
+          || !/thread-store conflict|already has an active writer/iu.test(errorText(error))) throw error;
+        restarted = true;
+        const importedContext = (await Promise.all((current.project.importedConversations ?? []).slice(0, 3)
+          .map(async (conversation) => conversationContext(conversation, await readImportedTurns(request.projectPath, conversation.id)))))
+          .join('\n\n---\n\n').slice(0, 42_000);
+        return runModel({ ...request, sessionId: undefined, configuredPath,
+          prompt: [request.prompt, '기존 Codex 채팅이 다른 앱에서 사용 중이므로 새 채팅에서 이어갑니다.',
+            importedContext && `가져온 기존 대화의 맥락:\n${importedContext}`].filter(Boolean).join('\n\n') });
+      });
     if (result.sessionId) {
       const timestamp = now();
       const session: ExternalSession = {
@@ -437,8 +449,11 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
       if (taskId) await replaceTask(request.projectPath, taskId, (task) => ({ ...task, sessions: update(task.sessions) }));
       else await replaceProject(request.projectPath, (project) => ({ ...project, sessions: update(project.sessions), updatedAt: timestamp }));
     }
+    if (restarted) await event(request.projectPath, current.project.id, 'system', 'system',
+      'Codex 원래 채팅이 다른 앱에서 사용 중이어서 새 CLI 채팅으로 이어갔습니다.', taskId, undefined,
+      { previousSessionId: previous?.sessionId ?? null, sessionId: result.sessionId ?? null });
     return result;
-  };
+  });
 
   const startProjectSessions = (projectPath: string): Promise<void> =>
     withLock(`project-sessions:${projectPath}`, async () => {

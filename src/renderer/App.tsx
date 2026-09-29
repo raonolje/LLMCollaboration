@@ -28,7 +28,7 @@ import appIcon from '../../assets/icon.svg?url';
 import './styles.css';
 
 type Tab = 'chat' | 'overview' | 'tasks' | 'debate' | 'history';
-type Dialog = 'project' | 'task' | 'delete-project' | 'import-conversation' | 'imported-history' | 'transcript' | 'session-history' | null;
+type Dialog = 'project' | 'task' | 'delete-project' | 'import-conversation' | 'imported-history' | 'transcript' | 'session-history' | 'chat-message' | null;
 
 const statusLabel: Record<TaskStatus, string> = {
   draft: '초안',
@@ -113,7 +113,7 @@ function SessionCard({ session, localHostId, onOpen, onOpenDesktop, onHistory }:
   return <div className={'session-card ' + session.provider}>
     <div className="session-card-head"><span className={'model-chip ' + session.provider}>{providerLabel(session.provider)}</span><span className="badge neutral">{sessionPurposeLabel[session.purpose]}</span>{!isLocal && <span className="badge warning">다른 컴퓨터</span>}<span className="activity-time">{shortTime(session.updatedAt)}</span></div>
     <div className="session-id" title={session.sessionId}>{session.sessionId}</div>
-    <div className="session-actions"><button className="button small" type="button" onClick={() => onHistory(session)}>저장된 대화 보기</button><button className="button small" type="button" disabled={!isLocal} onClick={() => onOpen(session)}>{isLocal ? 'CLI에서 이어 열기 ↗' : '이 컴퓨터에서 열 수 없음'}</button><button className="button small" type="button" disabled={!isLocal} onClick={() => onOpenDesktop(session)} title={session.provider === 'claude' ? 'CLI 대화를 Claude Code 데스크톱으로 가져옵니다. 이후 두 대화는 자동 동기화되지 않을 수 있습니다.' : undefined}>{session.provider === 'codex' ? 'Codex 앱에서 보기 ↗' : 'Claude Code 앱으로 가져오기 ↗'}</button></div>
+    <div className="session-actions"><button className="button small" type="button" onClick={() => onHistory(session)}>저장된 대화 보기</button><button className="button small" type="button" disabled={!isLocal} onClick={() => onOpen(session)}>{isLocal ? 'CLI에서 이어 열기 ↗' : '이 컴퓨터에서 열 수 없음'}</button><button className="button small" type="button" disabled={!isLocal} onClick={() => onOpenDesktop(session)} title={session.provider === 'claude' ? '현재 CLI 기록을 Claude Code 데스크톱에 사본으로 가져옵니다. 이후 CLI와 데스크톱 대화는 자동 동기화되지 않습니다.' : undefined}>{session.provider === 'codex' ? 'Codex 앱에서 보기 ↗' : 'Claude Code에 사본 가져오기 ↗'}</button></div>
   </div>;
 }
 
@@ -153,6 +153,7 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<CollaborationEvent[] | null>(null);
   const [transcriptView, setTranscriptView] = useState<{ path: string; content: string } | null>(null);
+  const [expandedChat, setExpandedChat] = useState<CollaborationEvent | null>(null);
   const [sessionHistory, setSessionHistory] = useState<{ session: ExternalSession; turns: SessionTurn[] } | null>(null);
   const [localConversations, setLocalConversations] = useState<ConversationCandidate[]>([]);
   const [selectedConversation, setSelectedConversation] = useState<ConversationCandidate | null>(null);
@@ -699,14 +700,19 @@ export default function App() {
           const visible = chatEvents.filter((item) => item.actor === provider
             || (item.actor === 'user' && (item.metadata?.target === 'both' || item.metadata?.target === provider))
             || (item.type === 'error' && item.metadata?.provider === provider));
+          const latestRequest = visible.filter((item) => item.actor === 'user' && item.type === 'chat').at(-1);
+          const pending = !!latestRequest && Date.now() - Date.parse(latestRequest.timestamp) < 10 * 60_000
+            && !events.some((item) => item.metadata?.replyTo === latestRequest.id
+              && (item.actor === provider || item.type === 'error' && item.metadata?.provider === provider));
           return <section className={'panel chat-column ' + provider} key={provider} aria-label={`${providerLabel(provider)} 채팅`}>
             <div className="chat-column-head"><span className={'model-chip ' + provider}>{providerLabel(provider)}</span><span className="subtle">{visible.length}개 기록</span></div>
             <div className="chat-messages" aria-live="polite">
               {visible.length ? visible.map((item) => <article className={'chat-message ' + (item.actor === 'user' ? 'from-user' : item.type === 'error' ? 'from-error' : 'from-model')} key={item.id}>
                 <div className="chat-message-head"><strong>{actorLabel(item.actor)}</strong>{item.type !== 'chat' && <span className="badge neutral">{eventLabel[item.type]}</span>}{item.taskId && <span className="badge neutral">{tasks.find((task) => task.id === item.taskId)?.title ?? '업무'}</span>}{item.actor === 'user' && item.metadata?.target === 'both' && <span className="badge neutral">두 모델 모두</span>}{item.type === 'chat' && item.actor === provider && item.metadata?.model && <span className="badge neutral">{item.metadata.model}{item.metadata.effort && item.metadata.effort !== 'default' ? ` · ${item.metadata.effort}` : ''}</span>}<span className="activity-time">{shortTime(item.timestamp)}</span></div>
                 <div className="chat-message-text">{item.message}</div>
-                {item.metadata?.transcript && <button className="button ghost small" type="button" onClick={() => openTranscript(item)}>CLI 원문</button>}
+                <div className="chat-message-actions"><button className="button ghost small" type="button" onClick={() => { setExpandedChat(item); setDialog('chat-message'); }}>전체 보기</button>{item.metadata?.transcript && <button className="button ghost small" type="button" onClick={() => openTranscript(item)}>CLI 원문</button>}</div>
               </article>) : <Empty icon="◎" title="아직 대화가 없습니다" detail={`${providerLabel(provider)}에게 첫 메시지를 보내세요.`} />}
+              {pending && <article className="chat-message from-model pending" role="status"><strong>{providerLabel(provider)} 생각 중 · 응답 생성 중…</strong><div className="chat-message-text">답변이 완성되면 자동으로 표시됩니다.</div></article>}
             </div>
           </section>;
         })}
@@ -748,7 +754,7 @@ export default function App() {
         <div className="panel stat"><span className="stat-label">승인된 결과</span><div className="stat-value">{taskCounts.approved}</div><div className="stat-help">교차 검수를 통과</div></div>
       </div>
       <div className="panel panel-pad">
-        <div className="panel-head"><div><h2>프로젝트 모델 채팅</h2><p className="subtle">이 컴퓨터에서 만든 CLI 채팅은 이어 열 수 있습니다. 다른 컴퓨터의 기록도 함께 보존됩니다.</p></div><span className="badge neutral">{project?.sessions?.length ?? 0}개 기록</span></div>
+        <div className="panel-head"><div><h2>프로젝트 모델 채팅</h2><p className="subtle">이 컴퓨터에서 만든 CLI 채팅은 이어 열 수 있습니다. Claude Code 데스크톱으로 가져오면 그 시점의 사본이 생성되며 이후 답변은 자동 동기화되지 않습니다.</p></div><span className="badge neutral">{project?.sessions?.length ?? 0}개 기록</span></div>
         {project?.sessions?.length ? <div className="session-grid">{project.sessions.map((session) => <SessionCard key={`${session.hostId}:${session.sessionId}`} session={session} localHostId={snapshot?.localHostId ?? ''} onOpen={openSession} onOpenDesktop={openDesktopSession} onHistory={viewSessionHistory} />)}</div>
           : <div className="session-empty">CLI 채팅이 아직 없습니다. CLI 로그인 상태와 전체 이력의 오류를 확인한 뒤 새로고침해 다시 시도하세요.</div>}
       </div>
@@ -948,6 +954,7 @@ export default function App() {
       <div className="form-actions"><button className="button" type="button" onClick={() => setDialog(null)}>취소</button><button className="button primary" type="submit" disabled={!!busy}>저장</button></div>
     </form></div></div>}
     {dialog === 'session-history' && sessionHistory && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setDialog(null)}><div className="modal session-history-modal" role="dialog" aria-modal="true" aria-label="저장된 모델 대화"><div className="modal-header"><div><h2>{providerLabel(sessionHistory.session.provider)} 저장된 대화</h2><p className="subtle">{sessionHistory.session.sessionId}</p></div><button className="close" aria-label="닫기" onClick={() => setDialog(null)}>×</button></div><div className="modal-body"><p className="subtle session-history-note">프로젝트 Git에 저장된 기록입니다. CLI나 데스크톱 앱 연결 없이 볼 수 있습니다.</p>{sessionHistory.turns.length ? sessionHistory.turns.map(({ event, prompt }) => <article className="session-turn" key={event.id}><div className="session-turn-head"><span className="badge neutral">{eventLabel[event.type]}</span><span className="activity-time">{shortTime(event.timestamp)}</span>{event.metadata?.transcript && <button className="button ghost small" type="button" onClick={() => openTranscript(event)}>CLI 원문</button>}</div>{prompt && <details className="session-prompt"><summary>모델에 전달한 요청</summary><pre>{prompt}</pre></details>}<div className="session-response">{event.message}</div></article>) : <Empty icon="◎" title="저장된 응답이 없습니다" detail="해당 세션의 작업 이력이 기록되면 이곳에 표시됩니다." />}</div></div></div>}
+    {dialog === 'chat-message' && expandedChat && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setDialog(null)}><div className="modal chat-response-modal" role="dialog" aria-modal="true" aria-label="채팅 답변 전체 보기"><div className="modal-header"><div><h2>{actorLabel(expandedChat.actor)} 답변 전체 보기</h2><p className="subtle">{shortTime(expandedChat.timestamp)} · {expandedChat.message.length.toLocaleString()}자</p></div><button className="close" aria-label="닫기" onClick={() => setDialog(null)}>×</button></div><div className="modal-body"><div className="session-response">{expandedChat.message}</div></div></div></div>}
     {dialog === 'transcript' && transcriptView && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setDialog(null)}><div className="modal transcript-modal" role="dialog" aria-modal="true" aria-label="CLI 원문 기록"><div className="modal-header"><div><h2>CLI 원문 기록</h2><p className="subtle">{transcriptView.path}</p></div><button className="close" aria-label="닫기" onClick={() => setDialog(null)}>×</button></div><div className="modal-body"><pre className="transcript-content">{transcriptView.content}</pre></div></div></div>}
   </div>;
 }
