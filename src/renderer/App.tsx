@@ -26,6 +26,7 @@ import type {
   TaskInput,
   TaskStatus,
 } from '../shared/types';
+import { parseDebateSummary } from '../shared/debate-summary';
 import appIcon from '../../assets/icon.svg?url';
 import './styles.css';
 
@@ -111,6 +112,27 @@ function ModelChip({ choice }: { choice: ModelChoice }) {
 
 function Empty({ icon, title, detail }: { icon: string; title: string; detail: string }) {
   return <div className="empty"><div className="empty-icon">{icon}</div><strong>{title}</strong><span>{detail}</span></div>;
+}
+
+function DebateSummaryPanel({ conclusion, onIssue, onRead }: {
+  conclusion?: CollaborationEvent;
+  onIssue: (issue: string) => void;
+  onRead: (event: CollaborationEvent) => void;
+}) {
+  const summary = conclusion ? parseDebateSummary(conclusion.message) : null;
+  const groups = [
+    { key: 'agreements' as const, title: '서로 동의한 점', empty: '구분된 합의 기록이 없습니다.' },
+    { key: 'disagreements' as const, title: '남은 이견', empty: '구분된 이견 기록이 없습니다.' },
+    { key: 'nextSteps' as const, title: '다음 지시·검증', empty: '구분된 후속 조치가 없습니다.' },
+  ];
+  return <section className="panel panel-pad debate-summary" aria-label="논쟁 요약">
+    <div className="panel-head"><div><h2>논쟁 요약</h2><p className="subtle">최종 결론에 명시된 합의점과 이견만 표시합니다.</p></div>{conclusion && <button className="button small" type="button" onClick={() => onRead(conclusion)}>결론 원문 보기</button>}</div>
+    {!conclusion ? <p className="subtle">결론이 작성되면 합의점과 남은 이견이 여기에 표시됩니다.</p>
+      : <div className="debate-summary-grid">{groups.map(({ key, title, empty }) => <div className={`debate-summary-group ${key}`} key={key}>
+        <h3>{title}</h3>{summary?.[key].length ? <ul>{summary[key].slice(0, 5).map((item, index) => <li key={`${key}-${index}`}><span>{item}</span>{key === 'disagreements' && item !== '없음' && <button className="button ghost small" type="button" onClick={() => onIssue(item)}>이 쟁점 지시하기</button>}</li>)}</ul> : <p>{empty}</p>}
+        {(summary?.[key].length ?? 0) > 5 && <button className="button ghost small" type="button" onClick={() => onRead(conclusion)}>나머지 항목 보기</button>}
+      </div>)}</div>}
+  </section>;
 }
 
 function PairingQR({ url, token }: { url: string; token: string }) {
@@ -1042,6 +1064,19 @@ export default function App() {
     </div>
   );
 
+  const debateConclusion = debateScope === 'project'
+    ? projectDebateEvents.filter((record) => record.type === 'decision' && record.metadata?.discussionConclusion === true).at(-1)
+    : debateEvents.filter((record) => record.type === 'decision' && record.actor !== 'system').at(-1);
+  const directDebateIssue = (issue: string): void => {
+    if (debateScope === 'task' && selectedDebateTask) {
+      setFollowUp(`다음 이견을 다시 검토하고 Codex와 Claude의 근거를 비교해 결론을 수정해 주세요:\n${issue}`);
+      setTimeout(() => document.getElementById('follow-up')?.focus(), 0);
+      return;
+    }
+    setChatDraft(`다음 이견을 다시 토론하고 합의 가능 여부와 남은 차이를 구분해 주세요:\n${issue}`);
+    setChatTarget('both'); setChatDiscussion(true); setComposerOpen(true);
+    setTimeout(() => document.getElementById('project-chat-input')?.focus(), 0);
+  };
   const renderDebate = () => (
     <div className="section-stack">
       <div className="toolbar">
@@ -1054,6 +1089,7 @@ export default function App() {
           {debateScope === 'task' && selectedDebateTask && <><button className="button primary" disabled={!!busy || runningTaskIds.has(selectedDebateTask.id)} onClick={() => runTaskAction(selectedDebateTask, 'debate')}>논쟁 시작</button>{runningTaskIds.has(selectedDebateTask.id) && <button className="button danger" disabled={cancelBusy} onClick={() => cancelTask(selectedDebateTask)}>중단</button>}</>}
         </div>
       </div>
+      <DebateSummaryPanel conclusion={debateConclusion} onIssue={directDebateIssue} onRead={(record) => { setExpandedChat(record); setDialog('chat-message'); }} />
       {debateScope === 'project' ? projectDebateEvents.length > 0 ? <div className="debate-flow">{projectDebateEvents.map((record) => <div className={'debate-card ' + (record.actor === 'system' || record.actor === 'user' ? '' : record.actor)} key={record.id}><div className="debate-header"><span className={'model-chip ' + record.actor}>{actorLabel(record.actor)}</span><span className="debate-role">{record.metadata?.discussionConclusion ? '최종 결론' : record.metadata?.discussionRound ? '상호 반론' : record.actor === 'user' ? '토론 요청' : '최초 답변'}</span>{record.metadata?.discussionRound && <span className="badge neutral">{record.metadata.discussionRound}회차</span>}{record.metadata?.transcript && <button className="button ghost small" onClick={() => openTranscript(record)}>CLI 원문</button>}<span className="activity-time" style={{ marginLeft: 'auto' }}>{shortTime(record.timestamp)}</span></div><div className={`debate-content${expandedRecordIds.includes(record.id) ? ' expanded' : ''}`}>{record.message}</div>{record.message.length > 280 && <button className="button ghost small" type="button" onClick={() => toggleRecord(record.id)}>{expandedRecordIds.includes(record.id) ? '접기' : '펼치기'}</button>}<button className="button ghost small" type="button" onClick={() => { setExpandedChat(record); setDialog('chat-message'); }}>전체 보기</button></div>)}</div> : <div className="panel"><Empty icon="◇" title="프로젝트 채팅 토론이 없습니다" detail="채팅에서 두 모델을 선택하고 토론을 요청하면 이곳에 왕복 기록이 표시됩니다." /></div> : selectedDebateTask ? <>
         <div className="note"><strong>{selectedDebateTask.title}</strong> · 기본 {selectedDebateTask.debateRounds}회 왕복. 양쪽 모델의 최종 입장과 미해결 쟁점이 기록됩니다.</div>
         <div className="debate-flow">

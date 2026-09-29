@@ -3,6 +3,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import { Alert, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StatusBar, StyleSheet, Text, TextInput, View } from 'react-native';
 import { loadConnection, request, saveConnection, watchEvents, type Catalog, type Connection, type ConversationCandidate, type Event, type Operation, type Project, type Provider, type Snapshot, type Target, type Task } from './api';
+import { parseDebateSummary } from '../src/shared/debate-summary';
 
 const color = { dark: '#111c35', blue: '#5266e9', ink: '#172644', muted: '#7785a0', line: '#dfe5f0', white: '#fff' };
 type Tab = 'chat' | 'overview' | 'tasks' | 'debate' | 'history';
@@ -48,6 +49,8 @@ export default function App() {
   const [historyLimit, setHistoryLimit] = useState(30);
   const [expandedMessages, setExpandedMessages] = useState<string[]>([]);
   const [selectedEvent, setSelectedEvent] = useState<Event | null>(null);
+  const [summaryEventId, setSummaryEventId] = useState('');
+  const [summaryDraft, setSummaryDraft] = useState('');
   const [target, setTarget] = useState<Target>('both');
   const [message, setMessage] = useState('');
   const [discussion, setDiscussion] = useState(false);
@@ -171,6 +174,24 @@ export default function App() {
   const visible = filtered.slice(-historyLimit);
   const debateEvents = (snapshot?.events ?? []).filter((event) => ['proposal', 'critique', 'response', 'evaluation', 'decision'].includes(event.type)
     || !!event.metadata?.discussionRound || !!event.metadata?.discussionConclusion);
+  const conclusions = debateEvents.filter((event) => event.type === 'decision' && (event.actor === 'codex' || event.actor === 'claude')
+    && (!!event.taskId || event.metadata?.discussionConclusion === true));
+  const selectedConclusion = conclusions.find((event) => event.id === summaryEventId) ?? conclusions.at(-1);
+  const debateSummary = selectedConclusion ? parseDebateSummary(selectedConclusion.message) : null;
+  const summaryTitle = (event: Event): string => event.taskId
+    ? snapshot?.tasks.find((task) => task.id === event.taskId)?.title ?? '업무 논쟁'
+    : `프로젝트 토론 · ${date(event.timestamp)}`;
+  const directSummaryIssue = (issue: string): void => setSummaryDraft(`다음 이견을 다시 검토하고 두 모델의 근거를 비교해 결론을 수정해 주세요:\n${issue}`);
+  const sendSummaryInstruction = (): void => {
+    if (!connection || !projectId || !summaryDraft.trim()) return;
+    const instruction = summaryDraft.trim();
+    const route = selectedConclusion?.taskId
+      ? `/projects/${projectId}/tasks/${selectedConclusion.taskId}/continue` : `/projects/${projectId}/chat`;
+    const body = selectedConclusion?.taskId
+      ? { message: instruction, target: 'both', additionalRounds: 1 }
+      : { message: instruction, target: 'both', models, discussion: true };
+    void act(async () => { await request(connection, route, body); setSummaryDraft(''); }, '추가 논쟁을 요청했습니다.');
+  };
   const historyEvents = (snapshot?.events ?? []).filter((event) => !historyQuery.trim()
     || `${event.message} ${event.actor} ${event.type}`.toLocaleLowerCase().includes(historyQuery.trim().toLocaleLowerCase()));
   const eventCard = (event: Event): React.ReactNode => {
@@ -280,7 +301,23 @@ export default function App() {
         {!snapshot?.tasks.length && <View style={s.empty}><Text style={s.emptyTitle}>등록된 업무가 없습니다</Text><Text style={s.hint}>위에서 업무를 추가하거나 자동 계획을 요청하세요.</Text></View>}
         {snapshot?.tasks.map((task) => <View key={task.id} style={s.taskCard}><Text style={s.taskTitle}>{task.title}</Text><Text style={s.taskMeta}>{task.status} · {task.executor.provider} 실행 · {task.reviewer.provider} 검수</Text><Text style={s.body}>{task.description}</Text><View style={s.row}><Button label="토론" onPress={() => runTask(task, 'debate')} /><Button label="실행" active onPress={() => runTask(task, 'execute')} /><Button label="중단" onPress={() => runTask(task, 'cancel')} /></View><TextInput style={s.input} placeholder="추가 반론이나 작업 수정" value={followUps[task.id] ?? ''} onChangeText={(value) => setFollowUps((old) => ({ ...old, [task.id]: value }))} /><Button label="추가 토론 · 1회 왕복" disabled={!(followUps[task.id] ?? '').trim()} onPress={() => { command(`/projects/${projectId}/tasks/${task.id}/continue`, { message: followUps[task.id], target: 'both', additionalRounds: 1 }, '추가 토론을 요청했습니다.'); setFollowUps((old) => ({ ...old, [task.id]: '' })); }} /></View>)}
         </>}
-        {tab === 'debate' && <><Text style={s.title}>모델 논쟁</Text><Text style={s.hint}>두 모델의 제안·반론·평가·결론을 순서대로 봅니다.</Text>{debateEvents.length ? debateEvents.map(eventCard) : <View style={s.empty}><Text style={s.emptyTitle}>논쟁 기록이 없습니다</Text><Text style={s.hint}>두 모델을 선택하고 토론을 켜서 지시를 보내세요.</Text></View>}</>}
+        {tab === 'debate' && <><Text style={s.title}>모델 논쟁</Text><Text style={s.hint}>두 모델의 제안·반론·평가·결론을 순서대로 봅니다.</Text>
+          <Panel title="논쟁 요약">
+            <Text style={s.hint}>최종 결론에 명시된 합의점과 이견만 표시합니다.</Text>
+            {conclusions.length > 0 && <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.horizontal}>{[...conclusions].reverse().map((event) => <Button key={event.id} label={summaryTitle(event)} active={event.id === selectedConclusion?.id} onPress={() => { setSummaryEventId(event.id); setSummaryDraft(''); }} />)}</ScrollView>}
+            {selectedConclusion ? <>
+              {([
+                { key: 'agreements' as const, title: '서로 동의한 점', empty: '구분된 합의 기록이 없습니다.' },
+                { key: 'disagreements' as const, title: '남은 이견', empty: '구분된 이견 기록이 없습니다.' },
+                { key: 'nextSteps' as const, title: '다음 지시·검증', empty: '구분된 후속 조치가 없습니다.' },
+              ]).map(({ key, title, empty }) => <View key={key} style={[s.summaryGroup, key === 'agreements' ? s.summaryAgreement : key === 'disagreements' ? s.summaryDisagreement : s.summaryNext]}>
+                <Text style={s.label}>{title}</Text>{debateSummary?.[key].length ? debateSummary[key].slice(0, 5).map((item, index) => <View key={`${key}-${index}`} style={s.summaryItem}><Text style={s.body}>• {item}</Text>{key === 'disagreements' && item !== '없음' && <Button label="이 쟁점 지시하기" onPress={() => directSummaryIssue(item)} />}</View>) : <Text style={s.hint}>{empty}</Text>}
+              </View>)}
+              <Button label="결론 원문 보기" onPress={() => setSelectedEvent(selectedConclusion)} />
+              {summaryDraft && <View style={s.summaryInstruction}><Text style={s.label}>추가 논쟁 지시</Text><TextInput style={[s.input, s.multiline]} multiline value={summaryDraft} onChangeText={setSummaryDraft} /><Button label="지시 보내기" active disabled={busy || !summaryDraft.trim()} onPress={sendSummaryInstruction} /></View>}
+            </> : <Text style={s.hint}>결론이 작성되면 합의점과 남은 이견이 여기에 표시됩니다.</Text>}
+          </Panel>
+          {debateEvents.length ? debateEvents.map(eventCard) : <View style={s.empty}><Text style={s.emptyTitle}>논쟁 기록이 없습니다</Text><Text style={s.hint}>두 모델을 선택하고 토론을 켜서 지시를 보내세요.</Text></View>}</>}
         {tab === 'history' && <><Text style={s.title}>전체 이력</Text><TextInput style={s.input} placeholder="내용, 모델, 업무 기록 검색" value={historyQuery} onChangeText={setHistoryQuery} />
           <Text style={s.hint}>{historyEvents.length}개 기록</Text>{historyEvents.slice(-historyLimit).reverse().map(eventCard)}
           {historyEvents.length > historyLimit && <Button label="이전 기록 더 보기" onPress={() => setHistoryLimit((current) => current + 30)} />}
@@ -403,6 +440,12 @@ const s = StyleSheet.create({
   statNumber: { color: color.ink, fontSize: 25, fontWeight: '800' },
   taskTitle: { color: color.ink, fontSize: 16, fontWeight: '800' },
   taskMeta: { color: color.muted, fontSize: 12 },
+  summaryGroup: { padding: 13, borderWidth: 1, borderColor: color.line, borderTopWidth: 3, borderRadius: 11, gap: 9, backgroundColor: '#f8faff' },
+  summaryAgreement: { borderTopColor: '#58a67a' },
+  summaryDisagreement: { borderTopColor: '#dc9167' },
+  summaryNext: { borderTopColor: '#6076df' },
+  summaryItem: { gap: 4 },
+  summaryInstruction: { gap: 8, borderTopWidth: 1, borderTopColor: color.line, paddingTop: 12 },
   modalBackdrop: { flex: 1, backgroundColor: '#101b35aa', justifyContent: 'flex-end' },
   modalSheet: { backgroundColor: color.white, borderTopLeftRadius: 22, borderTopRightRadius: 22, padding: 18, paddingBottom: Platform.OS === 'web' ? 18 : 34, maxHeight: '82%', gap: 12 },
   recordSheet: { maxHeight: '94%', minHeight: '70%' },

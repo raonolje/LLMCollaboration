@@ -119,6 +119,17 @@ p { margin: 0; }
 .toolbar-actions { display: flex; gap: 8px; }
 .note { padding: 11px 14px; border: 1px solid #e2e7f8; border-radius: 10px; background: #f6f7fe; color: #68749b; font-size: 11px; line-height: 1.55; }
 .debate-flow { display: grid; gap: 13px; }
+.debate-summary-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.debate-summary-group { min-width: 0; padding: 15px; border: 1px solid #dfe6f0; border-radius: 12px; background: #f8faff; }
+.debate-summary-group.agreements { border-top: 3px solid #58a67a; }
+.debate-summary-group.disagreements { border-top: 3px solid #dc9167; }
+.debate-summary-group.nextSteps { border-top: 3px solid #6076df; }
+.debate-summary-group h3 { margin: 0 0 11px; font-size: 13px; }
+.debate-summary-group ul { margin: 0; padding-left: 18px; display: grid; gap: 11px; }
+.debate-summary-group li { white-space: pre-wrap; overflow-wrap: anywhere; color: #34435f; font-size: 12px; line-height: 1.6; }
+.debate-summary-group li button { display: block; margin-top: 5px; }
+.debate-summary-group p { color: #8390a5; font-size: 12px; line-height: 1.6; }
+@media (max-width: 1120px) { .debate-summary-grid { grid-template-columns: 1fr; } }
 .debate-card { padding: 17px 19px; border-radius: 13px; border: 1px solid #e8ecf2; background: #fff; }
 .debate-card.codex { border-left: 3px solid #5c9e7b; }
 .debate-card.claude { border-left: 3px solid #d89663; }

@@ -531,6 +531,7 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
       prompt: [
         '두 모델의 토론과 최종 평가를 바탕으로 실행 가능한 단일 결론을 작성하세요. 작업 폴더를 수정하지 마세요.',
         '합의된 결정, 남은 이견, 이견별 판단 근거, 실제 실행 단계, 완료 기준과 검증 방법을 구분하세요.',
+        '결론의 첫 부분에 반드시 다음 제목을 순서대로 쓰고 각 항목을 짧은 글머리표로 작성하세요: ## 합의된 사항, ## 남은 이견, ## 다음 지시·검증. 이견이 없다면 남은 이견에 "없음"이라고 쓰세요.',
         '상대 의견이 해결되지 않았으면 합의로 꾸미지 말고 미해결이라고 명시하세요.',
         `양측 평가:\n${evaluations.map((item) => `${item.actor}: ${item.message}`).join('\n\n')}`,
         taskCard(project, task, events, task.reviewer.provider),
@@ -587,7 +588,7 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
       projectPath, cwd: projectPath, choice: { provider: 'claude', model: String(request.metadata?.claudeModel ?? 'default') },
       effort: request.metadata?.claudeEffort === 'default' ? undefined : String(request.metadata?.claudeEffort ?? 'medium'), phase: 'project-discussion-conclusion', readOnly: true, signal,
       prompt: [`사용자 요청: ${request.message}`, `Codex·Claude의 전체 토론 기록:\n${debateTranscript}`,
-        '두 모델이 실제로 서로의 반론에 답했는지 평가하세요. 합의점, 미해결 이견과 각자의 근거, 실행 가능한 최종 산출물 초안, 검증 기준을 구분하세요. 해결되지 않은 이견은 합의로 꾸미지 마세요. 사용자에게 다시 단순 계획만 제안하지 마세요. 파일은 수정하지 마세요.'].join('\n\n'),
+        '두 모델이 실제로 서로의 반론에 답했는지 평가하세요. 결론의 첫 부분에 ## 합의된 사항, ## 남은 이견, ## 다음 지시·검증 제목을 순서대로 쓰고 각 항목을 짧은 글머리표로 작성하세요. 미해결 이견에는 두 모델의 입장과 근거를 적고, 이견이 없으면 "없음"이라고 쓰세요. 이어서 실행 가능한 최종 산출물 초안과 검증 기준을 제시하세요. 해결되지 않은 이견은 합의로 꾸미지 마세요. 사용자에게 다시 단순 계획만 제안하지 마세요. 파일은 수정하지 마세요.'].join('\n\n'),
     }, 'project');
     await event(projectPath, initial.project.id, 'decision', 'claude', conclusion.text, undefined, undefined,
       { replyTo: messageId, discussionConclusion: true, transcript: conclusion.transcript, sessionId: conclusion.sessionId ?? null });
