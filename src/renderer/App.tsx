@@ -129,10 +129,21 @@ function PairingQR({ url, token }: { url: string; token: string }) {
 function SessionCard({ session, localHostId, onOpen, onOpenDesktop, onHandoff, onHistory }: { session: ExternalSession; localHostId: string; onOpen: (session: ExternalSession) => void; onOpenDesktop: (session: ExternalSession) => void; onHandoff: (session: ExternalSession) => void; onHistory: (session: ExternalSession) => void }) {
   const isLocal = session.hostId === localHostId;
   return <div className={'session-card ' + session.provider}>
-    <div className="session-card-head"><span className={'model-chip ' + session.provider}>{providerLabel(session.provider)}</span><span className="badge neutral">{sessionPurposeLabel[session.purpose]}</span>{!isLocal && <span className="badge warning">다른 컴퓨터</span>}<span className="activity-time">{shortTime(session.updatedAt)}</span></div>
+    <div className="session-card-head"><span className={'model-chip ' + session.provider}>{providerLabel(session.provider)}</span><span className="badge neutral">{sessionPurposeLabel[session.purpose]}</span>{!isLocal && <span className="badge warning">다른 앱 환경</span>}<span className="activity-time">{shortTime(session.updatedAt)}</span></div>
     <div className="session-id" title={session.sessionId}>{session.sessionId}</div>
     <div className="session-actions"><button className="button small" type="button" disabled={!isLocal} onClick={() => onOpen(session)}>{isLocal ? 'CLI에서 이어 열기 ↗' : '이 컴퓨터에서 열 수 없음'}</button>{session.provider === 'claude' && <button className="button small" type="button" disabled={!isLocal} onClick={() => onHandoff(session)} title="터미널에서 대화를 이어 열고 /desktop 명령을 클립보드에 복사합니다. 붙여넣고 Enter를 누르세요.">Claude Code로 넘기기 ↗</button>}<button className="button small" type="button" onClick={() => onHistory(session)}>저장된 대화 보기</button><button className="button small" type="button" disabled={!isLocal} onClick={() => onOpenDesktop(session)} title={session.provider === 'claude' ? '현재 CLI 기록을 Claude Code 데스크톱에 사본으로 가져옵니다. 이후 CLI와 데스크톱 대화는 자동 동기화되지 않습니다.' : undefined}>{session.provider === 'codex' ? 'Codex 앱에서 보기 ↗' : 'Claude Code에 사본 가져오기 ↗'}</button></div>
   </div>;
+}
+
+function SessionGroups({ sessions, localHostId, onOpen, onOpenDesktop, onHandoff, onHistory }: { sessions: ExternalSession[]; localHostId: string; onOpen: (session: ExternalSession) => void; onOpenDesktop: (session: ExternalSession) => void; onHandoff: (session: ExternalSession) => void; onHistory: (session: ExternalSession) => void }) {
+  const card = (session: ExternalSession) => <SessionCard key={`${session.hostId}:${session.sessionId}`} session={session} localHostId={localHostId} onOpen={onOpen} onOpenDesktop={onOpenDesktop} onHandoff={onHandoff} onHistory={onHistory} />;
+  return <div className="session-group-grid">{(['codex', 'claude'] as Provider[]).map((provider) => {
+    const matching = sessions.filter((session) => session.provider === provider).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    if (!matching.length) return null;
+    const primary = matching.find((session) => session.hostId === localHostId) ?? matching[0];
+    const older = matching.filter((session) => session !== primary);
+    return <section className="session-group" key={provider} aria-label={`${providerLabel(provider)} 대화 세션`}><h3>{providerLabel(provider)} 대화 <span className="badge neutral">{matching.length}개 기록</span></h3>{card(primary)}{older.length > 0 && <details className="session-older"><summary>이전 대화 {older.length}개 보기</summary><div className="session-grid">{older.map(card)}</div></details>}</section>;
+  })}</div>;
 }
 
 function ConversationPicker({ candidates, selected, manualPath, manualProvider, busy, onSelect, onManualChange, onProviderChange, onChooseFile }: {
@@ -184,11 +195,15 @@ export default function App() {
   const [cliBusy, setCliBusy] = useState<Provider | 'refresh' | null>(null);
   const [chatDraft, setChatDraft] = useState('');
   const [chatFiles, setChatFiles] = useState<ChatFileInput[]>([]);
+  const [chatDragActive, setChatDragActive] = useState(false);
   const [chatDiscussion, setChatDiscussion] = useState(false);
+  const [chatTaskExecutor, setChatTaskExecutor] = useState<Provider>('codex');
   const [discussingMessageId, setDiscussingMessageId] = useState<string | null>(null);
   const [clockMs, setClockMs] = useState(() => Date.now());
   useEffect(() => { const timer = setInterval(() => setClockMs(Date.now()), 1000); return () => clearInterval(timer); }, []);
   const [chatTarget, setChatTarget] = useState<Provider | 'both'>('both');
+  const [debateScope, setDebateScope] = useState<'project' | 'task'>('project');
+  const [projectDiscussionId, setProjectDiscussionId] = useState('');
   const [chatModels, setChatModels] = useState<Record<Provider, ChatModelSettings>>({ codex: { model: '', effort: '' }, claude: { model: '', effort: '' } });
   const [modelCatalogs, setModelCatalogs] = useState<ModelCatalog[]>([]);
   const [modelBusy, setModelBusy] = useState(false);
@@ -206,6 +221,7 @@ export default function App() {
       .finally(() => setRemoteBusy(false));
   };
   const [chatSendingPaths, setChatSendingPaths] = useState<ReadonlySet<string>>(() => new Set());
+  const [chatTaskId, setChatTaskId] = useState<string | null>(null);
 
   const project = snapshot?.project ?? null;
   const tasks = snapshot?.tasks ?? [];
@@ -219,6 +235,14 @@ export default function App() {
     () => events.filter((event) => event.taskId === selectedDebateTask?.id && debateTypes.includes(event.type)),
     [events, selectedDebateTask?.id],
   );
+  const projectDiscussions = useMemo(() => events.filter((record) => record.type === 'chat' && record.actor === 'user'
+    && events.some((reply) => reply.metadata?.replyTo === record.id
+      && (typeof reply.metadata?.discussionRound === 'number' || reply.metadata?.discussionConclusion === true))), [events]);
+  const selectedProjectDiscussion = projectDiscussions.find((record) => record.id === projectDiscussionId) ?? projectDiscussions.at(-1);
+  const projectDebateEvents = useMemo(() => selectedProjectDiscussion
+    ? [selectedProjectDiscussion, ...events.filter((record) => record.metadata?.replyTo === selectedProjectDiscussion.id
+      && (record.type === 'chat' || record.metadata?.discussionConclusion === true))] : [],
+  [events, selectedProjectDiscussion]);
   const recentEvents = useMemo(() => [...events].reverse().slice(0, 5), [events]);
   const searchDisplay = useMemo(() => [...(searchResults ?? events)].reverse(), [searchResults, events]);
   const taskCounts = useMemo(() => ({
@@ -591,6 +615,7 @@ export default function App() {
       try {
         if (type === 'debate') {
           setDebateTaskId(task.id);
+          setDebateScope('task');
           setTab('debate');
           await window.collab.runDebate(projectPath, task.id);
         } else {
@@ -723,15 +748,79 @@ export default function App() {
       .finally(() => setChatSendingPaths((previous) => new Set([...previous].filter((item) => item !== projectPath))));
   };
 
+  const requestChatTask = (): void => {
+    if (!project || !chatDraft.trim() || chatSending) return;
+    const projectPath = project.path;
+    const message = chatDraft.trim();
+    const files = [...chatFiles];
+    const executor = chatTarget === 'both' ? chatTaskExecutor : chatTarget;
+    const reviewer: Provider = executor === 'codex' ? 'claude' : 'codex';
+    const title = message.split(/\r?\n/u).find((line) => line.trim())?.trim().slice(0, 80) ?? '채팅 업무';
+    setChatSendingPaths((previous) => new Set([...previous, projectPath]));
+    void (async () => {
+      try {
+        const attachmentSnapshot = files.length
+          ? await window.collab.sendProjectMessage(projectPath, message, chatTarget, chatModels, files, false)
+          : null;
+        const attachmentEvent = attachmentSnapshot?.events.filter((item) => item.type === 'chat' && item.actor === 'user').at(-1);
+        const attachmentPaths = typeof attachmentEvent?.metadata?.attachments === 'string'
+          ? (JSON.parse(attachmentEvent.metadata.attachments) as Array<{ path: string }>).map((file) => file.path).join('\n')
+          : '';
+        const input: TaskInput = {
+          title,
+          description: [message, attachmentPaths && `첨부 자료 경로 (프로젝트 폴더 기준):\n${attachmentPaths}`].filter(Boolean).join('\n\n'),
+          acceptanceCriteria: ['요청한 결과를 프로젝트 폴더에 저장하고, 요구사항 충족 여부를 검수 모델이 확인한다.'],
+          mode: 'manual',
+          executor: { provider: executor, model: chatModels[executor].model },
+          reviewer: { provider: reviewer, model: chatModels[reviewer].model },
+          dependsOn: [],
+          debateRounds: project.defaultDebateRounds,
+        };
+        const created = await window.collab.createTask(projectPath, input);
+        const task = created.tasks.find((item) => !tasks.some((previous) => previous.id === item.id));
+        if (!task) throw new Error('생성된 업무를 찾을 수 없습니다. 업무 탭을 확인해 주세요.');
+        setSnapshot((current) => current?.project.path === projectPath ? created : current);
+        setChatDraft('');
+        setChatFiles([]);
+        setRunningTaskIds((previous) => new Set([...previous, task.id]));
+        setChatTaskId(task.id);
+        setDebateTaskId(task.id);
+        setDebateScope('task');
+        setTab('debate');
+        notify('업무를 만들었습니다. 두 모델의 토론과 실행·교차 검수를 시작합니다.');
+        try {
+          await window.collab.runDebate(projectPath, task.id);
+          const debated = await window.collab.openProject(projectPath);
+          if (!debated.tasks.find((item) => item.id === task.id)?.debateSummary) {
+            notify('토론이 종료되어 업무 실행은 시작하지 않았습니다.');
+            return;
+          }
+          await window.collab.executeTask(projectPath, task.id);
+          notify('업무 실행과 교차 검수가 끝났습니다. 결과를 확인해 주세요.');
+        } finally {
+          setRunningTaskIds((previous) => new Set([...previous].filter((id) => id !== task.id)));
+          setChatTaskId(null);
+        }
+      } catch (error) {
+        notify(errorText(error), true);
+      } finally {
+        await refresh(projectPath).catch((error: unknown) => notify(errorText(error), true));
+        setChatSendingPaths((previous) => new Set([...previous].filter((item) => item !== projectPath)));
+      }
+    })();
+  };
+
   const addBrowserFiles = (files: readonly File[]): void => {
     if (!files.length) return;
+    if (chatSending) { notify('현재 답변이 끝난 뒤 파일을 첨부해 주세요.', true); return; }
     void Promise.all(files.map(encodeBrowserFile)).then((encoded) => setChatFiles((current) => {
       if (current.length + encoded.length > 5) { notify('첨부 파일은 최대 5개입니다.', true); return current; }
       return [...current, ...encoded];
     })).catch((error: unknown) => notify(errorText(error), true));
   };
-  const dropChatFiles = (event: DragEvent<HTMLFormElement>): void => {
+  const dropChatFiles = (event: DragEvent<HTMLDivElement>): void => {
     event.preventDefault();
+    setChatDragActive(false);
     addBrowserFiles([...event.dataTransfer.files]);
   };
   const pasteChatFiles = (event: ClipboardEvent<HTMLTextAreaElement>): void => {
@@ -751,7 +840,18 @@ export default function App() {
   };
 
   const renderChat = () => (
-    <div className="section-stack">
+    <div className={`section-stack chat-drop-area${chatDragActive ? ' is-dragging' : ''}`}
+      onDragOver={(event) => {
+        if (!event.dataTransfer.types.includes('Files')) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'copy';
+        if (!chatDragActive) setChatDragActive(true);
+      }}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setChatDragActive(false);
+      }}
+      onDrop={dropChatFiles}>
+      {chatDragActive && <div className="chat-drop-hint" aria-hidden="true">이미지·파일을 놓아 첨부하기</div>}
       <div className="toolbar"><div><h2>프로젝트 채팅</h2><p className="subtle">Codex와 Claude의 답변을 나란히 보며 팀장으로서 방향을 조정하세요.</p></div></div>
       <div className="chat-grid">
         {(['codex', 'claude'] as Provider[]).map((provider) => {
@@ -791,7 +891,7 @@ export default function App() {
           </section>;
         })}
       </div>
-      <form className="panel panel-pad chat-compose" onSubmit={sendChat} onDragOver={(event) => event.preventDefault()} onDrop={dropChatFiles}>
+      <form className="panel panel-pad chat-compose" onSubmit={sendChat}>
         <div className="panel-head"><div><h2>지시 또는 질문</h2><p className="subtle">보낼 대상을 선택하세요. 지시는 프로젝트 Git 기록에 저장되고 이후 해당 모델의 업무 단계에도 전달됩니다.</p></div></div>
         <div className="chat-targets" role="group" aria-label="메시지 받을 모델">
           {([{ value: 'both', label: '두 모델 모두' }, { value: 'codex', label: 'Codex만' }, { value: 'claude', label: 'Claude만' }] as const).map(({ value, label }) => <button type="button" key={value} className={'button ' + (chatTarget === value ? 'primary' : '')} aria-pressed={chatTarget === value} onClick={() => setChatTarget(value)}>{label}</button>)}
@@ -815,9 +915,10 @@ export default function App() {
           </div>;
         })}</div>
         <div className="field"><label htmlFor="project-chat-input">메시지</label><textarea id="project-chat-input" value={chatDraft} maxLength={20_000} rows={4} onChange={(event) => setChatDraft(event.target.value)} onPaste={pasteChatFiles} placeholder="메시지 입력 · 이미지 여러 개 드래그 또는 Ctrl+V로 스크린샷 붙여넣기" /></div>
+        {chatTarget === 'both' && <div className="field chat-task-executor"><label htmlFor="chat-task-executor">업무 실행 담당</label><select id="chat-task-executor" value={chatTaskExecutor} onChange={(event) => setChatTaskExecutor(event.target.value as Provider)}><option value="codex">Codex 실행 · Claude 검수</option><option value="claude">Claude 실행 · Codex 검수</option></select></div>}
         <label className="chat-discussion-toggle"><input type="checkbox" checked={chatDiscussion} disabled={chatTarget !== 'both'} onChange={(event) => setChatDiscussion(event.target.checked)} />두 모델이 서로 반론하며 토론하기 · 기본 {project?.defaultDebateRounds ?? 2}회 왕복</label>
         <div className="chat-attachments"><button className="button small" type="button" disabled={chatSending || chatFiles.length >= 5} onClick={() => void window.collab.chooseChatFiles().then((chosen) => setChatFiles((current) => [...current, ...chosen].slice(0, 5))).catch((error: unknown) => notify(errorText(error), true))}>＋ 이미지·파일 첨부</button>{chatFiles.map((file, index) => <button className="button ghost small" type="button" key={`${pendingFileName(file)}-${index}`} title={pendingFileName(file)} onClick={() => setChatFiles((current) => current.filter((_, position) => position !== index))}>📎 {pendingFileName(file)} ×</button>)}</div>
-        <div className="chat-compose-actions"><span className="subtle">첨부 파일은 프로젝트 Git에 저장되고 두 모델에 같은 경로로 전달됩니다. 파일당 25MB, 총 50MB · 5개까지.</span><div className="session-actions">{chatSending && <button className="button danger" type="button" onClick={() => project && void window.collab.cancelProjectMessage(project.path)}>응답 중단</button>}<button className="button primary" type="submit" disabled={(!chatDraft.trim() && !chatFiles.length) || chatSending}>{chatSending ? '답변 받는 중…' : '메시지 보내기'}</button></div></div>
+        <div className="chat-compose-actions"><span className="subtle">첨부 파일은 프로젝트 Git에 저장됩니다. 업무로 요청하면 토론 → 실행 → 다른 모델의 검수가 이어집니다. 파일당 25MB, 총 50MB · 5개까지.</span><div className="session-actions">{chatSending && <button className="button danger" type="button" onClick={() => { if (!project) return; if (chatTaskId) void window.collab.cancelRun(project.path, chatTaskId).then(() => notify('업무 중단 요청을 보냈습니다.')).catch((error: unknown) => notify(errorText(error), true)); else void window.collab.cancelProjectMessage(project.path); }}>응답 중단</button>}<button className="button" type="button" disabled={!chatDraft.trim() || chatSending} onClick={requestChatTask}>업무로 요청</button><button className="button primary" type="submit" disabled={(!chatDraft.trim() && !chatFiles.length) || chatSending}>{chatSending ? '진행 중…' : '메시지 보내기'}</button></div></div>
       </form>
     </div>
   );
@@ -831,7 +932,7 @@ export default function App() {
       </div>
       <div className="panel panel-pad">
         <div className="panel-head"><div><h2>프로젝트 모델 채팅</h2><p className="subtle">이 컴퓨터에서 만든 CLI 채팅은 이어 열 수 있습니다. Claude Code 데스크톱으로 가져오면 그 시점의 사본이 생성되며 이후 답변은 자동 동기화되지 않습니다.</p></div><span className="badge neutral">{project?.sessions?.length ?? 0}개 기록</span></div>
-        {project?.sessions?.length ? <div className="session-grid">{project.sessions.map((session) => <SessionCard key={`${session.hostId}:${session.sessionId}`} session={session} localHostId={snapshot?.localHostId ?? ''} onOpen={openSession} onOpenDesktop={openDesktopSession} onHandoff={handoffClaudeSession} onHistory={viewSessionHistory} />)}</div>
+        {project?.sessions?.length ? <SessionGroups sessions={project.sessions} localHostId={snapshot?.localHostId ?? ''} onOpen={openSession} onOpenDesktop={openDesktopSession} onHandoff={handoffClaudeSession} onHistory={viewSessionHistory} />
           : <div className="session-empty">CLI 채팅이 아직 없습니다. CLI 로그인 상태와 전체 이력의 오류를 확인한 뒤 새로고침해 다시 시도하세요.</div>}
       </div>
       <div className="panel panel-pad">
@@ -902,13 +1003,13 @@ export default function App() {
                 {!!task.sourceConversationIds?.length && <span>참고 대화 {task.sourceConversationIds.length}개</span>}
               </div>
               <div className="model-pair" style={{ marginTop: 9 }}><ModelChip choice={task.executor} /><span>실행 → 검수</span><ModelChip choice={task.reviewer} /></div>
-              {!!task.sessions?.length && <details className="task-sessions"><summary>별도 CLI 채팅 {task.sessions.length}개</summary><div className="session-grid">{task.sessions.map((session) => <SessionCard key={`${session.hostId}:${session.sessionId}`} session={session} localHostId={snapshot?.localHostId ?? ''} onOpen={openSession} onOpenDesktop={openDesktopSession} onHandoff={handoffClaudeSession} onHistory={viewSessionHistory} />)}</div></details>}
+              {!!task.sessions?.length && <details className="task-sessions"><summary>별도 CLI 채팅 {task.sessions.length}개</summary><SessionGroups sessions={task.sessions} localHostId={snapshot?.localHostId ?? ''} onOpen={openSession} onOpenDesktop={openDesktopSession} onHandoff={handoffClaudeSession} onHistory={viewSessionHistory} /></details>}
               {task.reviewSummary && <p className="subtle" style={{ marginTop: 8 }}>검수: {task.reviewSummary.slice(0, 150)}</p>}
             </div>
             <div className="task-controls">
               <button className="button small" disabled={!!busy} onClick={() => openTaskDialog(task)}>편집</button>
               {task.mode === 'automatic' && <button className="button small" disabled={!!busy} onClick={() => assignTask(task)}>자동 배정</button>}
-              <button className="button small" disabled={!!busy} onClick={() => { setDebateTaskId(task.id); setTab('debate'); }}>논쟁 보기</button>
+              <button className="button small" disabled={!!busy} onClick={() => { setDebateTaskId(task.id); setDebateScope('task'); setTab('debate'); }}>논쟁 보기</button>
               <button className="button small" disabled={!!busy || runningTaskIds.has(task.id)} onClick={() => runTaskAction(task, 'debate')}>논쟁 시작</button>
               <button className="button primary small" disabled={!!busy || runningTaskIds.has(task.id) || task.status === 'running' || task.status === 'reviewing'} onClick={() => runTaskAction(task, 'execute')}>실행·검수</button>
               {(runningTaskIds.has(task.id) || ['debating', 'running', 'reviewing'].includes(task.status)) && <button className="button danger small" disabled={cancelBusy} onClick={() => cancelTask(task)}>중단</button>}
@@ -922,13 +1023,16 @@ export default function App() {
   const renderDebate = () => (
     <div className="section-stack">
       <div className="toolbar">
-        <div><h2>모델 논쟁</h2><p className="subtle">독립 제안부터 반론, 답변 평가, 결론까지 원문을 보존합니다.</p></div>
+        <div><h2>모델 논쟁</h2><p className="subtle">프로젝트 채팅과 업무에서 진행한 반론·재평가·결론의 원문을 보존합니다.</p></div>
         <div className="toolbar-actions">
-          {tasks.length > 0 && <select aria-label="토론할 업무" value={selectedDebateTask?.id ?? ''} onChange={(event) => setDebateTaskId(event.target.value)} className="button"><option value="" disabled>업무 선택</option>{tasks.map((task) => <option key={task.id} value={task.id}>{task.title}</option>)}</select>}
-          {selectedDebateTask && <><button className="button primary" disabled={!!busy || runningTaskIds.has(selectedDebateTask.id)} onClick={() => runTaskAction(selectedDebateTask, 'debate')}>논쟁 시작</button>{runningTaskIds.has(selectedDebateTask.id) && <button className="button danger" disabled={cancelBusy} onClick={() => cancelTask(selectedDebateTask)}>중단</button>}</>}
+          <button className={`button ${debateScope === 'project' ? 'primary' : ''}`} type="button" onClick={() => setDebateScope('project')}>프로젝트 채팅 토론 {projectDiscussions.length}</button>
+          <button className={`button ${debateScope === 'task' ? 'primary' : ''}`} type="button" onClick={() => setDebateScope('task')}>업무 논쟁</button>
+          {debateScope === 'project' && projectDiscussions.length > 0 && <select aria-label="프로젝트 토론 선택" value={selectedProjectDiscussion?.id ?? ''} onChange={(event) => setProjectDiscussionId(event.target.value)} className="button">{[...projectDiscussions].reverse().map((record) => <option key={record.id} value={record.id}>{shortTime(record.timestamp)} · {record.message.slice(0, 50)}</option>)}</select>}
+          {debateScope === 'task' && tasks.length > 0 && <select aria-label="토론할 업무" value={selectedDebateTask?.id ?? ''} onChange={(event) => setDebateTaskId(event.target.value)} className="button"><option value="" disabled>업무 선택</option>{tasks.map((task) => <option key={task.id} value={task.id}>{task.title}</option>)}</select>}
+          {debateScope === 'task' && selectedDebateTask && <><button className="button primary" disabled={!!busy || runningTaskIds.has(selectedDebateTask.id)} onClick={() => runTaskAction(selectedDebateTask, 'debate')}>논쟁 시작</button>{runningTaskIds.has(selectedDebateTask.id) && <button className="button danger" disabled={cancelBusy} onClick={() => cancelTask(selectedDebateTask)}>중단</button>}</>}
         </div>
       </div>
-      {selectedDebateTask ? <>
+      {debateScope === 'project' ? projectDebateEvents.length > 0 ? <div className="debate-flow">{projectDebateEvents.map((record) => <div className={'debate-card ' + (record.actor === 'system' || record.actor === 'user' ? '' : record.actor)} key={record.id}><div className="debate-header"><span className={'model-chip ' + record.actor}>{actorLabel(record.actor)}</span><span className="debate-role">{record.metadata?.discussionConclusion ? '최종 결론' : record.metadata?.discussionRound ? '상호 반론' : record.actor === 'user' ? '토론 요청' : '최초 답변'}</span>{record.metadata?.discussionRound && <span className="badge neutral">{record.metadata.discussionRound}회차</span>}{record.metadata?.transcript && <button className="button ghost small" onClick={() => openTranscript(record)}>CLI 원문</button>}<span className="activity-time" style={{ marginLeft: 'auto' }}>{shortTime(record.timestamp)}</span></div><div className="debate-content">{record.message}</div></div>)}</div> : <div className="panel"><Empty icon="◇" title="프로젝트 채팅 토론이 없습니다" detail="채팅에서 두 모델을 선택하고 토론을 요청하면 이곳에 왕복 기록이 표시됩니다." /></div> : selectedDebateTask ? <>
         <div className="note"><strong>{selectedDebateTask.title}</strong> · 기본 {selectedDebateTask.debateRounds}회 왕복. 양쪽 모델의 최종 입장과 미해결 쟁점이 기록됩니다.</div>
         <div className="debate-flow">
           {debateEvents.length ? debateEvents.map((event) => (
