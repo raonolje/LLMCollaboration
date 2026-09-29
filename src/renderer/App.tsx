@@ -60,7 +60,8 @@ const sessionPurposeLabel: Record<ExternalSession['purpose'], string> = {
 };
 const actorLabel = (actor: CollaborationEvent['actor']): string =>
   actor === 'system' ? '시스템' : actor === 'user' ? '사용자' : providerLabel(actor);
-const errorText = (error: unknown): string => error instanceof Error ? error.message : String(error);
+const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error))
+  .replace(/^Error invoking remote method '[^']+': Error: /u, '');
 const shortTime = (value: string): string => {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
