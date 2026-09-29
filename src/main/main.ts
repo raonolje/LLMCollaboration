@@ -3,8 +3,16 @@ import path from 'node:path';
 import type { CollaborationEvent, LaunchRequest, Provider } from '../shared/types';
 import { createService } from './services';
 import { installChatSkills, parseLaunchUrl } from './chat-link';
+import { recycleDirectoryWithWindows } from './windows-recycle';
 
 let mainWindow: BrowserWindow | null = null;
+const trashItemWithFallback = async (target: string): Promise<void> => {
+  try { await shell.trashItem(target); }
+  catch (error) {
+    if (process.platform !== 'win32') throw error;
+    await recycleDirectoryWithWindows(target);
+  }
+};
 let pendingLaunch: LaunchRequest | null = process.argv.map(parseLaunchUrl).find((item) => item !== null) ?? null;
 const receiveLaunch = (value: string): void => {
   const request = parseLaunchUrl(value);
@@ -58,7 +66,7 @@ const registerHandlers = (): void => {
   const service = createService({
     registryPath: path.join(app.getPath('userData'), 'projects.json'),
     emit: (event: CollaborationEvent) => mainWindow?.webContents.send('collab:event', event),
-    trashItem: (target: string) => shell.trashItem(target),
+    trashItem: trashItemWithFallback,
   });
 
   ipcMain.handle('collab:bootstrap', () => service.bootstrap());
