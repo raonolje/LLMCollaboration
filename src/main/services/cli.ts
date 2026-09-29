@@ -141,7 +141,7 @@ export const runCli = async (request: CliRequest): Promise<CliResult> => {
     : [];
   const args = request.choice.provider === 'codex'
     ? ['exec', '--json', '--cd', request.cwd, '--sandbox', request.readOnly ? 'read-only' : 'workspace-write', ...modelArgs, ...(request.sessionId ? ['resume', request.sessionId, '-'] : ['-'])]
-    : ['-p', '--verbose', '--output-format', 'stream-json', '--permission-mode', request.readOnly ? 'plan' : 'acceptEdits', '--permission-prompts', 'none', '--tools', request.readOnly ? 'Read,Glob,Grep' : 'default', ...modelArgs, ...(request.sessionId ? ['--resume', request.sessionId] : []), 'Follow the full task instructions supplied on standard input.'];
+    : ['-p', '--verbose', '--output-format', 'stream-json', '--permission-mode', request.readOnly ? 'plan' : 'acceptEdits', '--permission-prompts', 'none', '--tools', request.readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash', ...modelArgs, ...(request.sessionId ? ['--resume', request.sessionId] : []), 'Follow the full task instructions supplied on standard input.'];
 
   const child = spawn(names[request.choice.provider], args, {
     cwd: request.cwd,
