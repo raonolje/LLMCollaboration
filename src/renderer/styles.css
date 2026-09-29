@@ -203,8 +203,14 @@ p { margin: 0; }
 .chat-message { flex: none; max-width: 94%; border: 1px solid #e2e8f0; border-radius: 12px; padding: 11px 13px; background: #f8faff; overflow-wrap: anywhere; }
 .chat-message.from-user { align-self: flex-end; background: #edf1ff; border-color: #dce4ff; }
 .chat-message.from-error { border-color: #f5c6cf; background: #fff1f3; }
-.chat-message.pending { border-style: dashed; color: #5266e9; }
+.chat-message.pending { border-style: dashed; color: #5266e9; background: linear-gradient(105deg, #f8faff 15%, #e8edff 38%, #f8faff 62%); background-size: 250% 100%; animation: pending-glow 2.5s ease-in-out infinite; }
+.chat-message.pending strong { animation: pending-text-glow 2.5s ease-in-out infinite; }
+@keyframes pending-glow { 0%, 100% { background-position: 100% 50%; } 50% { background-position: 0% 50%; } }
+@keyframes pending-text-glow { 0%, 100% { text-shadow: 0 0 0 transparent; } 50% { text-shadow: 0 0 12px #5266e977; } }
+@media (prefers-reduced-motion: reduce) { .chat-message.pending, .chat-message.pending strong { animation: none; } }
 .chat-message-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.chat-attachments { display: flex; gap: 7px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+.chat-discussion-toggle { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 12px; font-weight: 700; color: #34435f; cursor: pointer; }
 .chat-response-modal { width: min(1000px, calc(100vw - 48px)); }
 .chat-message-head { display: flex; align-items: center; gap: 7px; margin-bottom: 7px; font-size: 11px; }
 .chat-message-head .activity-time { margin-left: auto; }

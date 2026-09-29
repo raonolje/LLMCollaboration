@@ -14,13 +14,13 @@ const json = (response: ServerResponse, status: number, value: unknown): void =>
   response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
   response.end(JSON.stringify(value));
 };
-const readBody = async (request: IncomingMessage): Promise<unknown> => {
+const readBody = async (request: IncomingMessage, maximum = 128_000): Promise<unknown> => {
   let size = 0;
   const chunks: Buffer[] = [];
   for await (const chunk of request) {
     const buffer = Buffer.from(chunk as Buffer);
     size += buffer.length;
-    if (size > 128_000) throw new Error('메시지 크기 제한을 초과했습니다.');
+    if (size > maximum) throw new Error('메시지 크기 제한을 초과했습니다.');
     chunks.push(buffer);
   }
   return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
@@ -140,16 +140,22 @@ export const createRemote = (service: Service, userData: string, options: { addr
         json(response, 200, await service.openProject(directory)); return;
       }
       if (request.method !== 'POST') { json(response, 405, { error: '지원하지 않는 요청입니다.' }); return; }
-      const body = object(await readBody(request));
       const action = segments[3];
+      const body = object(await readBody(request, action === 'chat' ? 70_000_000 : 128_000));
       if (action === 'chat') {
-        const chatMessage = text(body.message);
         const chatTarget = target(body.target);
         const models = object(body.models ?? {});
         const selected = Object.fromEntries((['codex', 'claude'] as Provider[])
           .filter((provider) => models[provider])
           .map((provider) => [provider, models[provider]])) as Partial<Record<Provider, ChatModelSettings>>;
-        json(response, 202, launch('chat', id, () => service.sendProjectMessage(directory, chatMessage, chatTarget, selected), { target: chatTarget })); return;
+        const files = body.files ?? [];
+        if (!Array.isArray(files) || files.length > 5 || files.some((file) => !file || typeof file !== 'object'
+          || typeof file.name !== 'string' || typeof file.data !== 'string')) throw new Error('첨부 파일은 최대 5개입니다.');
+        const chatMessage = files.length && !String(body.message ?? '').trim() ? '' : text(body.message);
+        const discussion = body.discussion === true;
+        json(response, 202, launch('chat', id, () => files.length || discussion
+          ? service.sendProjectMessage(directory, chatMessage, chatTarget, selected, files, discussion)
+          : service.sendProjectMessage(directory, chatMessage, chatTarget, selected), { target: chatTarget })); return;
       }
       if (action === 'cancel-chat') { await service.cancelProjectMessage(directory); json(response, 200, { ok: true }); return; }
       if (action === 'tasks' && segments.length === 4) {

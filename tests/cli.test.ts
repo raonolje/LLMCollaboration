@@ -15,7 +15,7 @@ vi.mock('node:child_process', async (importOriginal) => {
   return { ...original, execFile, spawn: spawnCli };
 });
 
-import { assertSubscription, cliStatus, openCliSession, resolveCliExecutable, runCli } from '../src/main/services/cli';
+import { assertSubscription, cliArguments, cliStatus, openCliSession, resolveCliExecutable, runCli } from '../src/main/services/cli';
 
 const savedEnvironment = {
   path: process.env.PATH,
@@ -50,6 +50,12 @@ const withTemporaryWorkspace = async <T>(run: (workspace: string) => Promise<T>)
 const missingFromPath = Object.assign(new Error('spawn codex ENOENT'), { code: 'ENOENT' });
 
 describe.skipIf(process.platform !== 'win32')('Windows CLI discovery and execution', () => {
+  it('attaches images to new and resumed Codex prompts', () => {
+    const request = { projectPath: 'project', cwd: 'project', choice: { provider: 'codex' as const, model: 'default' },
+      prompt: 'Inspect the screenshot', phase: 'chat', readOnly: true, signal: new AbortController().signal, imagePaths: ['screenshot.png'] };
+    expect(cliArguments(request)).toContain('--image');
+    expect(cliArguments({ ...request, sessionId: 'session-1' })).toEqual(expect.arrayContaining(['resume', '--image', 'screenshot.png', 'session-1', '-']));
+  });
   it('finds npm command shims for both providers on PATH', () => withTemporaryWorkspace(async (workspace) => {
     const binaries = ['codex.cmd', 'claude.cmd'].map((name) => path.join(workspace, name));
     await Promise.all(binaries.map((binary) => writeFile(binary, '@echo off\r\n', 'utf8')));

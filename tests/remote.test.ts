@@ -51,6 +51,13 @@ describe('remote companion', () => {
       expect(new TextDecoder().decode((await reader?.read())?.value)).toContain('"kind":"operation"');
       streamAbort.abort();
       await vi.waitFor(() => expect(sendProjectMessage).toHaveBeenCalledWith(directory, 'Check this', 'codex', {}));
+      const mobileFile = { name: 'phone-photo.jpg', data: Buffer.from('image').toString('base64') };
+      const attached = await fetch(`${status.url}/v1/projects/project-1/chat`, {
+        method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: '', target: 'both', models: {}, files: [mobileFile] }),
+      });
+      expect(attached.status).toBe(202);
+      await vi.waitFor(() => expect(sendProjectMessage).toHaveBeenCalledWith(directory, '', 'both', {}, [mobileFile], false));
       const rotated = await remote.rotateToken();
       expect(rotated.token).not.toBe(status.token);
       expect((await fetch(`${status.url}/v1/projects`, { headers })).status).toBe(401);

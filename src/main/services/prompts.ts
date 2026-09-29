@@ -1,4 +1,6 @@
 import type { CollaborationEvent, Project, Provider, Task } from '../../shared/types';
+import path from 'node:path';
+import { taskWorktree } from './repository';
 
 const compact = (value: string, max = 18_000): string =>
   value.length > max ? `${value.slice(0, max)}\n… (전체 원문은 프로젝트 기록에 보존됨)` : value;
@@ -10,10 +12,24 @@ export const projectChatGuidance = (events: readonly CollaborationEvent[], recip
   events.filter((event) => event.type === 'chat' && event.actor === 'user'
     && (event.metadata?.target === 'both' || event.metadata?.target === recipient))
     .slice(-12)
-    .map((event) => `[${event.timestamp}] ${compact(event.message, 2000)}`)
+    .map((event) => `[${event.timestamp}] ${compact(event.message, 2000)}${typeof event.metadata?.attachments === 'string' ? `\n첨부 파일: ${event.metadata.attachments}` : ''}`)
     .join('\n\n') || '추가 지시 없음';
 
 export const taskCard = (project: Project, task: Task, events: readonly CollaborationEvent[], recipient: Provider): string => {
+  const sharedAttachments = events.filter((event) => event.type === 'chat' && event.actor === 'user' && typeof event.metadata?.attachments === 'string')
+    .slice(-12).flatMap((event) => {
+      try {
+        const files = JSON.parse(String(event.metadata?.attachments)) as { name?: string; path?: string }[];
+        return Array.isArray(files) ? files.filter((file) => typeof file.path === 'string')
+          .map((file) => `${file.name ?? '파일'}: ${path.join(project.path, String(file.path))}`) : [];
+      } catch { return []; }
+    });
+  const sharedArtifacts = events.filter((event) => event.type === 'artifact' && event.taskId)
+    .slice(-10).flatMap((event) => event.message.split(/\r?\n/u).slice(1)
+      .filter((file) => file && !path.isAbsolute(file) && !file.startsWith('..'))
+      .map((file) => `${event.actor} 산출물: ${path.join(project.path, file)}`));
+  const activeWorktrees = events.filter((event) => event.type === 'execution' && event.taskId && event.metadata?.branch)
+    .slice(-5).map((event) => `${event.actor} 진행 중 작업 폴더 (읽기만): ${taskWorktree(project.path, project.id, String(event.taskId))}`);
   const relevant = events
     .filter((event) => event.taskId === task.id)
     .slice(-28)
@@ -26,6 +42,13 @@ export const taskCard = (project: Project, task: Task, events: readonly Collabor
     `프로젝트 헌장/제약: ${compact(project.charter || '아직 별도 헌장 없음', 4000)}`,
     '## 팀장의 최근 채팅 지시',
     projectChatGuidance(events, recipient),
+    '## 공유 파일',
+    `프로젝트 폴더: ${project.path}`,
+    `이 업무의 승인된 산출물: ${task.artifacts.map((file) => path.join(project.path, file)).join(', ') || '없음'}`,
+    ...sharedAttachments,
+    ...sharedArtifacts,
+    ...activeWorktrees,
+    '프로젝트 폴더의 파일과 위 첨부 파일은 두 모델이 읽을 수 있습니다. 상대 모델이 만든 파일도 실제 내용을 확인하고 사용하세요.',
     '## 현재 업무 카드',
     `업무 ID: ${task.id}`,
     `업무: ${task.title}`,

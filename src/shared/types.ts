@@ -6,6 +6,8 @@ export type ModelChoice = Readonly<{
 }>;
 
 export type ChatModelSettings = Readonly<{ model: string; effort: string }>;
+export type ChatAttachment = Readonly<{ name: string; path: string; size: number }>;
+export type ChatFileInput = string | Readonly<{ name: string; data: string }>;
 export type ModelOption = Readonly<{
   id: string;
   label: string;
@@ -197,7 +199,9 @@ export type CollaborationAPI = Readonly<{
   setRemoteEnabled: (enabled: boolean) => Promise<RemoteStatus>;
   rotateRemoteToken: () => Promise<RemoteStatus>;
   createProject: (input: ProjectInput) => Promise<ProjectSnapshot>;
-  sendProjectMessage: (projectPath: string, message: string, target: Provider | 'both', models: Partial<Record<Provider, ChatModelSettings>>) => Promise<ProjectSnapshot>;
+  chooseChatFiles: () => Promise<string[]>;
+  sendProjectMessage: (projectPath: string, message: string, target: Provider | 'both', models: Partial<Record<Provider, ChatModelSettings>>, files?: ChatFileInput[], discussion?: boolean) => Promise<ProjectSnapshot>;
+  continueProjectDiscussion: (projectPath: string, messageId: string) => Promise<ProjectSnapshot>;
   cancelProjectMessage: (projectPath: string) => Promise<void>;
   listLocalConversations: (target?: LaunchRequest) => Promise<ConversationCandidate[]>;
   consumeLaunchRequest: () => Promise<LaunchRequest | null>;
@@ -225,6 +229,7 @@ export type CollaborationAPI = Readonly<{
   readTranscript: (projectPath: string, transcript: string) => Promise<string>;
   readSessionHistory: (projectPath: string, sessionId: string) => Promise<SessionTurn[]>;
   openSession: (projectPath: string, sessionId: string) => Promise<void>;
+  handoffClaudeSession: (projectPath: string, sessionId: string) => Promise<void>;
   openDesktopSession: (projectPath: string, sessionId: string, provider: Provider) => Promise<void>;
   onEvent: (listener: (event: CollaborationEvent) => void) => () => void;
 }>;

@@ -116,6 +116,65 @@ describe('service orchestration with an injected model', () => {
     expect(next.events.filter((item) => item.actor === 'codex' && item.type === 'chat')).toHaveLength(2);
   }), 30_000);
 
+  it('stores chat attachments in project Git and gives both models the same files', () => withTemporaryWorkspace(async (workspace) => {
+    const projectPath = path.join(workspace, 'project');
+    const source = path.join(workspace, 'reference image.png');
+    await writeFile(source, 'image bytes');
+    const calls: CliRequest[] = [];
+    const service = createService({
+      registryPath: path.join(workspace, 'registry.json'), emit: () => undefined, autoStartSessions: false,
+      runModel: async (request) => {
+        calls.push(request);
+        return { ...await recordMockTranscript(request, 'I found the attachment'), sessionId: `${request.choice.provider}-session` };
+      },
+    });
+    await service.createProject({ path: projectPath, name: 'Assets', goal: 'Share references' });
+    const result = await service.sendProjectMessage(projectPath, 'Review this image', 'both', {}, [source]);
+    const user = result.events.find((item) => item.actor === 'user' && item.type === 'chat');
+    const attachments = JSON.parse(String(user?.metadata?.attachments)) as { name: string; path: string }[];
+    expect(attachments).toHaveLength(1);
+    expect(await readFile(path.join(projectPath, attachments[0].path), 'utf8')).toBe('image bytes');
+    expect(await git(projectPath, ['ls-files', '--', attachments[0].path.replaceAll('\\', '/')])).toContain('reference image.png');
+    expect(calls).toHaveLength(2);
+    expect(calls.every((call) => call.prompt.includes(path.join(projectPath, attachments[0].path)))).toBe(true);
+    expect(calls.find((call) => call.choice.provider === 'codex')?.imagePaths).toEqual([path.join(projectPath, attachments[0].path)]);
+    const pasted = await service.sendProjectMessage(projectPath, '', 'both', {}, [
+      { name: 'pasted-screenshot.png', data: Buffer.from('clipboard image').toString('base64') },
+    ]);
+    const pastedEvent = pasted.events.filter((item) => item.actor === 'user' && item.type === 'chat').at(-1);
+    const pastedFiles = JSON.parse(String(pastedEvent?.metadata?.attachments)) as { path: string }[];
+    expect(await readFile(path.join(projectPath, pastedFiles[0].path), 'utf8')).toBe('clipboard image');
+    const followUp = await service.sendProjectMessage(projectPath, 'Use the same file', 'claude');
+    expect(calls[4].prompt).toContain('reference image.png');
+    expect(calls[4].prompt).toContain('pasted-screenshot.png');
+    expect(followUp.events.filter((item) => item.actor === 'claude' && item.type === 'chat')).toHaveLength(3);
+  }), 30_000);
+
+  it('passes each model the other model\'s prior argument for two discussion rounds and records a conclusion', () => withTemporaryWorkspace(async (workspace) => {
+    const projectPath = path.join(workspace, 'project');
+    const calls: CliRequest[] = [];
+    const service = createService({
+      registryPath: path.join(workspace, 'registry.json'), emit: () => undefined, autoStartSessions: false,
+      runModel: async (request) => {
+        calls.push(request);
+        return { ...await recordMockTranscript(request, `${request.choice.provider} ${request.phase}`),
+          sessionId: `${request.choice.provider}-project-session` };
+      },
+    });
+    await service.createProject({ path: projectPath, name: 'Debate', goal: 'Agree on a storyboard' });
+    const result = await service.sendProjectMessage(projectPath, '서로 토론해서 콘티를 작성해', 'both');
+    const discussion = result.events.filter((item) => item.metadata?.replyTo && item.actor !== 'user');
+    expect(calls).toHaveLength(7);
+    expect(calls.filter((call) => call.phase === 'project-discussion-1')).toHaveLength(2);
+    expect(calls.filter((call) => call.phase === 'project-discussion-2')).toHaveLength(2);
+    expect(calls.filter((call) => call.phase === 'project-discussion-1').every((call) =>
+      call.prompt.includes('codex project-chat') && call.prompt.includes('claude project-chat'))).toBe(true);
+    expect(calls.filter((call) => call.phase === 'project-discussion-2').every((call) =>
+      call.prompt.includes('codex project-discussion-1') && call.prompt.includes('claude project-discussion-1'))).toBe(true);
+    expect(calls.at(-1)?.prompt).toContain('전체 토론 기록');
+    expect(discussion.filter((item) => item.type === 'decision' && item.metadata?.discussionConclusion)).toHaveLength(1);
+  }), 30_000);
+
   it('runs two debate rounds, accepts a targeted follow-up, gets a second-model review, and merges approved work', () => withTemporaryWorkspace(async (workspace) => {
     const projectPath = path.join(workspace, 'project');
     const calls: CliRequest[] = [];

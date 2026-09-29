@@ -34,7 +34,7 @@ export const saveConnection = async (connection: Connection | null): Promise<voi
 };
 export const request = async <T>(connection: Connection, route: string, body?: unknown): Promise<T> => {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30_000);
+  const timeout = setTimeout(() => controller.abort(), route.endsWith('/chat') ? 120_000 : 30_000);
   try {
     const response = await fetch(`${connection.url.replace(/\/$/u, '')}/v1${route}`, {
       method: body === undefined ? 'GET' : 'POST',

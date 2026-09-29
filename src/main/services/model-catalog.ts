@@ -90,13 +90,13 @@ export const parseClaudeAliases = (markdown: string): ModelOption[] => {
   const sonnetName = apiVersions?.[2].trim() ?? 'Sonnet';
   const fableName = markdown.match(/`fable` alias resolves to (Fable [\d.]+)/u)?.[1] ?? 'Fable';
   const names: Record<string, string> = {
-    best: `Best · Fable 가능 시 사용, 아니면 ${opusName}`,
+    best: `자동 선택 Best · Fable 가능 시 사용, 아니면 ${opusName}`,
     fable: `Claude ${fableName} (앱 경로는 Fable 5) · fable 별칭`,
-    opus: `Claude ${opusName} (Anthropic API 기준) · opus 별칭`,
-    sonnet: `Claude ${sonnetName} (Anthropic API 기준) · sonnet 별칭`,
+    opus: `Claude ${opusName} · 기본 문맥 (opus 별칭)`,
+    sonnet: `Claude ${sonnetName} · 기본 문맥 (sonnet 별칭)`,
     haiku: 'Claude Haiku · haiku 별칭',
-    'sonnet[1m]': `Claude ${sonnetName} · sonnet[1m]`,
-    'opus[1m]': `Claude ${opusName} · opus[1m]`,
+    'sonnet[1m]': `Claude ${sonnetName} · 100만 토큰 문맥 (sonnet[1m])`,
+    'opus[1m]': `Claude ${opusName} · 100만 토큰 문맥 (opus[1m])`,
   };
   const label = (id: string): string => names[id] ?? id;
   return [...section.matchAll(/^\| \*\*`([^`]+)`\*\* \| ([^|]+) \|/gmu)]

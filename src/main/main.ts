@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from 'electron';
 import path from 'node:path';
 import type { CollaborationEvent, LaunchRequest, Provider } from '../shared/types';
 import { createService } from './services';
@@ -122,7 +122,13 @@ const registerHandlers = (): void => {
     return downloaded;
   });
   ipcMain.handle('collab:createProject', (_event, input) => service.createProject(input));
-  ipcMain.handle('collab:sendProjectMessage', (_event, projectPath, message, target, models) => service.sendProjectMessage(projectPath, message, target, models));
+  ipcMain.handle('collab:chooseChatFiles', async () => {
+    const options: Electron.OpenDialogOptions = { title: '채팅에 첨부할 이미지 또는 파일 선택', properties: ['openFile', 'multiSelections'] };
+    const result = mainWindow ? await dialog.showOpenDialog(mainWindow, options) : await dialog.showOpenDialog(options);
+    return result.canceled ? [] : result.filePaths;
+  });
+  ipcMain.handle('collab:sendProjectMessage', (_event, projectPath, message, target, models, files, discussion) => service.sendProjectMessage(projectPath, message, target, models, files, discussion));
+  ipcMain.handle('collab:continueProjectDiscussion', (_event, projectPath, messageId) => service.continueProjectDiscussion(projectPath, messageId));
   ipcMain.handle('collab:cancelProjectMessage', (_event, projectPath) => service.cancelProjectMessage(projectPath));
   ipcMain.handle('collab:listLocalConversations', (_event, target?: LaunchRequest) => service.listLocalConversations(target));
   ipcMain.handle('collab:consumeLaunchRequest', () => {
@@ -152,6 +158,14 @@ const registerHandlers = (): void => {
   ipcMain.handle('collab:readTranscript', (_event, projectPath, transcript) => service.readTranscript(projectPath, transcript));
   ipcMain.handle('collab:readSessionHistory', (_event, projectPath, sessionId) => service.readSessionHistory(projectPath, sessionId));
   ipcMain.handle('collab:openSession', (_event, projectPath, sessionId) => service.openSession(projectPath, sessionId));
+  ipcMain.handle('collab:handoffClaudeSession', async (_event, projectPath, sessionId) => {
+    const current = await service.openProject(projectPath);
+    const session = [...(current.project.sessions ?? []), ...current.tasks.flatMap((task) => task.sessions ?? [])]
+      .find((item) => item.sessionId === sessionId && item.hostId === current.localHostId && item.provider === 'claude');
+    if (!session) throw new Error('이 컴퓨터의 Claude CLI 대화 세션을 찾을 수 없습니다.');
+    await service.openSession(projectPath, sessionId);
+    clipboard.writeText('/desktop');
+  });
   ipcMain.handle('collab:openDesktopSession', async (_event, projectPath, sessionId, provider: Provider) => {
     if (provider !== 'codex' && provider !== 'claude') throw new Error('지원하지 않는 모델입니다.');
     const current = await service.openProject(projectPath);

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, realpathSync } from 'node:fs';
-import { lstat, mkdir, readFile, readdir, realpath, stat, writeFile } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, readFile, readdir, realpath, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
@@ -10,6 +10,8 @@ import type {
   CollaborationAPI,
   CollaborationEvent,
   ChatModelSettings,
+  ChatAttachment,
+  ChatFileInput,
   DebateFollowUp,
   EventType,
   ExternalSession,
@@ -40,12 +42,13 @@ import {
   readTasks,
   removeTaskWorktree,
   taskChangedFiles,
+  taskWorktree,
   writeJson,
 } from './repository';
 import { conversationContext, importConversationFile, listLocalConversations, readImportedRaw, readImportedTurns } from './conversation-import';
 import { discoverModelCatalog } from './model-catalog';
 
-export type Service = Omit<CollaborationAPI, 'chooseDirectory' | 'chooseCliExecutable' | 'chooseConversationFile' | 'onEvent' | 'openDesktopSession' | 'consumeLaunchRequest' | 'onLaunchRequest' | 'installChatSkills' | 'checkAppUpdate' | 'downloadAppUpdate' | 'remoteStatus' | 'setRemoteEnabled' | 'rotateRemoteToken'> & { listProjects: () => Promise<Project[]> };
+export type Service = Omit<CollaborationAPI, 'chooseDirectory' | 'chooseCliExecutable' | 'chooseConversationFile' | 'chooseChatFiles' | 'onEvent' | 'openDesktopSession' | 'handoffClaudeSession' | 'consumeLaunchRequest' | 'onLaunchRequest' | 'installChatSkills' | 'checkAppUpdate' | 'downloadAppUpdate' | 'remoteStatus' | 'setRemoteEnabled' | 'rotateRemoteToken'> & { listProjects: () => Promise<Project[]> };
 
 export type ServiceOptions = Readonly<{
   registryPath: string;
@@ -56,6 +59,7 @@ export type ServiceOptions = Readonly<{
 }>;
 
 const providers: readonly Provider[] = ['codex', 'claude'];
+const isImageAttachment = (file: string): boolean => /\.(?:png|jpe?g|webp|gif)$/iu.test(file);
 const opposite = (provider: Provider): Provider => provider === 'codex' ? 'claude' : 'codex';
 const now = (): string => new Date().toISOString();
 const key = (projectPath: string, taskId: string): string => `${path.resolve(projectPath)}::${taskId}`;
@@ -533,6 +537,59 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
     await event(projectPath, project.id, 'decision', task.reviewer.provider, result.text, taskId, undefined, { transcript: result.transcript, sessionId: result.sessionId ?? null });
   };
 
+  const discussProjectMessage = async (projectPath: string, messageId: string, signal: AbortSignal): Promise<ProjectSnapshot> => {
+    const initial = await snapshot(projectPath);
+    const request = initial.events.find((item) => item.id === messageId && item.type === 'chat' && item.actor === 'user');
+    if (!request || request.metadata?.target !== 'both') throw new Error('두 모델 모두에게 보낸 채팅을 선택하세요.');
+    const images = (() => {
+      try {
+        const files = JSON.parse(String(request.metadata?.attachments ?? '[]')) as ChatAttachment[];
+        return Array.isArray(files) ? files.filter((file) => isImageAttachment(file.name) && !path.isAbsolute(file.path) && !file.path.includes('..'))
+          .map((file) => path.join(projectPath, file.path)) : [];
+      } catch { return []; }
+    })();
+    const replies = () => readEvents(projectPath).then((records) => records.filter((item) =>
+      item.metadata?.replyTo === messageId && item.type === 'chat' && providers.includes(item.actor as Provider)));
+    const first = await replies();
+    if (!providers.every((provider) => first.some((item) => item.actor === provider))) throw new Error('양쪽 모델의 첫 답변이 완료되어야 토론을 시작할 수 있습니다.');
+    const rounds = roundCount(initial.project.defaultDebateRounds);
+    await Array.from({ length: rounds }, (_, index) => index + 1).reduce<Promise<void>>((previous, round) => previous.then(async () => {
+      const all = await replies();
+      const latest = providers.map((provider) => all.filter((item) => item.actor === provider).at(-1)!);
+      await Promise.all(providers.map(async (provider) => {
+        const result = await trackedModel({
+          projectPath, cwd: projectPath, choice: { provider, model: String(request.metadata?.[`${provider}Model`] ?? 'default') },
+          imagePaths: provider === 'codex' ? images : [],
+          effort: request.metadata?.[`${provider}Effort`] === 'default' ? undefined : String(request.metadata?.[`${provider}Effort`] ?? 'medium'), phase: `project-discussion-${round}`,
+          readOnly: true, signal,
+          prompt: [
+            `프로젝트: ${initial.project.name}\n목표: ${initial.project.goal}\n기준: ${initial.project.charter || '추가 제약 없음'}`,
+            `사용자 요청: ${request.message}`,
+            `첨부 파일 (프로젝트 폴더 기준): ${String(request.metadata?.attachments ?? '없음')}`,
+            `이전 양쪽 답변:\n${latest.map((item) => `${item.actor}: ${item.message.slice(0, 20_000)}`).join('\n\n')}`,
+            round === 1 ? '상대 답변의 주장과 산출물을 구체적으로 반박·검증하세요. 동의하는 점도 근거와 함께 밝히고, 개선된 콘티나 결과 초안을 직접 제시하세요.'
+              : '상대의 직전 반론을 평가하고 재반론하세요. 수용할 지적을 반영해 산출물 초안을 구체적으로 수정하고 남은 이견을 명시하세요.',
+            '파일을 수정하지 마세요. 다른 모델이 확인할 수 있도록 근거와 파일 경로를 적으세요.',
+          ].join('\n\n'),
+        }, 'project');
+        await event(projectPath, initial.project.id, 'chat', provider, result.text, undefined, round,
+          { replyTo: messageId, discussionRound: round, transcript: result.transcript, sessionId: result.sessionId ?? null });
+      }));
+    }), Promise.resolve());
+    const finalReplies = await replies();
+    const debateTranscript = finalReplies.map((item) => `${item.actor}${item.metadata?.discussionRound ? ` ${item.metadata.discussionRound}회차` : ' 최초 답변'}: ${item.message.slice(0, 14_000)}`)
+      .join('\n\n---\n\n').slice(-75_000);
+    const conclusion = await trackedModel({
+      projectPath, cwd: projectPath, choice: { provider: 'claude', model: String(request.metadata?.claudeModel ?? 'default') },
+      effort: request.metadata?.claudeEffort === 'default' ? undefined : String(request.metadata?.claudeEffort ?? 'medium'), phase: 'project-discussion-conclusion', readOnly: true, signal,
+      prompt: [`사용자 요청: ${request.message}`, `Codex·Claude의 전체 토론 기록:\n${debateTranscript}`,
+        '두 모델이 실제로 서로의 반론에 답했는지 평가하세요. 합의점, 미해결 이견과 각자의 근거, 실행 가능한 최종 산출물 초안, 검증 기준을 구분하세요. 해결되지 않은 이견은 합의로 꾸미지 마세요. 사용자에게 다시 단순 계획만 제안하지 마세요. 파일은 수정하지 마세요.'].join('\n\n'),
+    }, 'project');
+    await event(projectPath, initial.project.id, 'decision', 'claude', conclusion.text, undefined, undefined,
+      { replyTo: messageId, discussionConclusion: true, transcript: conclusion.transcript, sessionId: conclusion.sessionId ?? null });
+    return snapshot(projectPath);
+  };
+
   const service: Service = {
     listProjects: async (): Promise<Project[]> => (await Promise.allSettled((await readRegisteredPaths())
       .map(async (projectPath) => ({ ...await readProject(projectPath), path: path.resolve(projectPath) }))))
@@ -541,10 +598,12 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
     listLocalConversations,
     refreshModelCatalogs: async () => Promise.all(providers.map(async (provider) =>
       discoverModelCatalog(provider, await cliPathFor(provider)))),
-    sendProjectMessage: async (projectPath: string, message: string, target: Provider | 'both', models: Partial<Record<Provider, ChatModelSettings>> = {}): Promise<ProjectSnapshot> => {
+    sendProjectMessage: async (projectPath: string, message: string, target: Provider | 'both', models: Partial<Record<Provider, ChatModelSettings>> = {}, files: ChatFileInput[] = [], discussion = false): Promise<ProjectSnapshot> => {
       const resolved = path.resolve(projectPath);
       const text = message.trim();
-      if (!text || text.length > 20_000) throw new Error('채팅 메시지는 1~20,000자로 입력하세요.');
+      if ((!text && !files.length) || text.length > 20_000) throw new Error('메시지 또는 첨부 파일을 입력하세요. 메시지는 최대 20,000자입니다.');
+      if (!Array.isArray(files) || files.length > 5 || files.some((file) => typeof file !== 'string'
+        && (!file || typeof file !== 'object' || typeof file.name !== 'string' || typeof file.data !== 'string'))) throw new Error('첨부 파일은 최대 5개입니다.');
       if (target !== 'both' && !providers.includes(target)) throw new Error('채팅 대상을 선택하세요.');
       const selectedModels = Object.fromEntries(providers.map((provider) => [provider, {
         model: (models?.[provider]?.model ?? '').trim(), effort: (models?.[provider]?.effort ?? '').trim(),
@@ -556,9 +615,32 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
       const controller = begin(resolved, 'project-chat');
       try {
         const project = await readProject(resolved);
-        const userMessage = await event(resolved, project.id, 'chat', 'user', text, undefined, undefined,
+        const sources = await Promise.all(files.map(async (file) => {
+          if (typeof file === 'string') {
+            const source = path.resolve(file);
+            const info = await lstat(source);
+            if (!info.isFile() || info.isSymbolicLink() || info.size > 25 * 1024 * 1024) throw new Error('첨부 파일은 일반 파일이며 각각 25MB 이하여야 합니다.');
+            return { content: source, size: info.size, name: path.basename(source).replace(/[^\p{L}\p{N}._ -]/gu, '_') };
+          }
+          if (file.name.length > 255 || !file.name.trim() || file.data.length > 35_000_000 || !/^[A-Za-z0-9+/]*={0,2}$/u.test(file.data)) throw new Error('첨부 파일 형식 또는 크기가 올바르지 않습니다.');
+          const content = Buffer.from(file.data, 'base64');
+          if (content.length > 25 * 1024 * 1024) throw new Error('첨부 파일은 각각 25MB 이하여야 합니다.');
+          return { content, size: content.length, name: path.basename(file.name).replace(/[^\p{L}\p{N}._ -]/gu, '_') };
+        }));
+        if (sources.reduce((total, file) => total + file.size, 0) > 50 * 1024 * 1024) throw new Error('첨부 파일 전체 크기는 50MB 이하여야 합니다.');
+        const attachments: ChatAttachment[] = await Promise.all(sources.map(async ({ content, size, name }) => {
+          const relative = path.join('.llm-collaboration', 'attachments', randomUUID(), name);
+          const destination = path.join(resolved, relative);
+          await mkdir(path.dirname(destination), { recursive: true });
+          if (typeof content === 'string') await copyFile(content, destination);
+          else await writeFile(destination, content);
+          return { name, path: relative, size };
+        }));
+        const attachmentLines = attachments.map((file) => `${file.name}: ${path.join(resolved, file.path)}`).join('\n');
+        const userMessage = await event(resolved, project.id, 'chat', 'user', text || '첨부 파일을 확인해 주세요.', undefined, undefined,
           { target, codexModel: selectedModels.codex.model || 'default', claudeModel: selectedModels.claude.model || 'default',
-            codexEffort: selectedModels.codex.effort || 'default', claudeEffort: selectedModels.claude.effort || 'default' });
+            codexEffort: selectedModels.codex.effort || 'default', claudeEffort: selectedModels.claude.effort || 'default',
+            attachments: JSON.stringify(attachments), discussion: target === 'both' && (discussion || /토론|논쟁|반론|debate/iu.test(text)) });
         const targets = target === 'both' ? providers : [target];
         await Promise.all(targets.map(async (provider) => {
           try {
@@ -568,7 +650,7 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
             const recent = current.events.filter((item) => item.type === 'chat' && item.id !== userMessage.id
               && (item.actor === 'user' ? visibleUserMessages.has(item.id)
                 : item.metadata?.replyTo ? visibleUserMessages.has(String(item.metadata.replyTo)) : item.actor === provider))
-              .slice(-16).map((item) => `${item.actor === 'user' ? '사용자' : item.actor}: ${item.message.slice(0, 1800)}`)
+              .slice(-16).map((item) => `${item.actor === 'user' ? '사용자' : item.actor}: ${item.message.slice(0, 1800)}${typeof item.metadata?.attachments === 'string' ? `\n첨부 파일: ${item.metadata.attachments}` : ''}`)
               .join('\n\n').slice(-20_000);
             const hasSession = current.project.sessions?.some((session) => session.hostId === current.localHostId
               && session.provider === provider && session.purpose === 'project');
@@ -576,22 +658,29 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
               .join('\n\n').slice(-12_000);
             const taskActivity = current.events.filter((item) => item.taskId && ['decision', 'execution', 'review', 'status', 'error'].includes(item.type))
               .slice(-10).map((item) => `${item.actor}/${item.type}: ${item.message.slice(0, 1200)}`).join('\n\n').slice(-10_000);
+            const sharedFiles = current.tasks.flatMap((task) => [
+              ...task.artifacts.map((file) => `${task.executor.provider} 승인 산출물: ${path.join(resolved, file)}`),
+              ...(task.branch && task.status !== 'approved' ? [`${task.executor.provider} 진행 중 작업 폴더 (읽기만): ${taskWorktree(resolved, current.project.id, task.id)}`] : []),
+            ]).slice(-30).join('\n');
             const importedContext = hasSession ? '' : (await Promise.all((current.project.importedConversations ?? []).slice(0, 3)
               .map(async (conversation) => conversationContext(conversation, await readImportedTurns(resolved, conversation.id)))))
               .join('\n\n---\n\n').slice(0, 42_000);
             const result = await trackedModel({
               projectPath: resolved, cwd: resolved, choice: { provider, model: selectedModels[provider].model || 'default' },
               effort: selectedModels[provider].effort || undefined,
+              imagePaths: provider === 'codex' ? attachments.filter((file) => isImageAttachment(file.name)).map((file) => path.join(resolved, file.path)) : [],
               prompt: [
                 `프로젝트: ${current.project.name}`,
                 `목표: ${current.project.goal}`,
                 `항상 유지할 기준: ${current.project.charter || '추가 제약 없음'}`,
                 taskState && `현재 업무 현황:\n${taskState}`,
                 taskActivity && `최근 업무 진행 기록:\n${taskActivity}`,
+                sharedFiles && `두 모델이 공유할 작업 파일:\n${sharedFiles}`,
                 importedContext && `가져온 대화의 맥락:\n${importedContext}`,
                 recent && `공유 채팅의 최근 대화:\n${recent}`,
+                attachmentLines && `이번 요청의 첨부 파일 (프로젝트 Git에 저장됨; 필요한 경우 경로에서 열어 확인):\n${attachmentLines}`,
                 `현재 사용자 메시지 (${target === 'both' ? '두 모델 모두' : provider}에게 전달):\n${text}`,
-                '현재 메시지에 답하세요. 파일 변경이 필요한 요청이라면 실행할 업무와 완료 기준을 제안하세요.',
+                '현재 메시지에 직접 답하고 요청한 산출물의 초안을 본문에 작성하세요. 실제 파일 변경이 필요하면 별도 업무 실행 단계를 제안하세요.',
               ].filter(Boolean).join('\n\n'),
               phase: 'project-chat', readOnly: true, signal: controller.signal,
             }, 'project');
@@ -604,11 +693,22 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
               undefined, undefined, { replyTo: userMessage.id, provider });
           }
         }));
+        const finishedReplies = await readEvents(resolved);
+        if (userMessage.metadata?.discussion && providers.every((provider) =>
+          finishedReplies.some((item) => item.metadata?.replyTo === userMessage.id && item.actor === provider && item.type === 'chat'))) {
+          return discussProjectMessage(resolved, userMessage.id, controller.signal);
+        }
         return snapshot(resolved);
       } finally { finish(resolved, 'project-chat'); }
     },
     cancelProjectMessage: async (projectPath: string): Promise<void> => {
       active.get(key(projectPath, 'project-chat'))?.abort();
+    },
+    continueProjectDiscussion: async (projectPath: string, messageId: string): Promise<ProjectSnapshot> => {
+      const resolved = path.resolve(projectPath);
+      const controller = begin(resolved, 'project-chat');
+      try { return await discussProjectMessage(resolved, messageId, controller.signal); }
+      finally { finish(resolved, 'project-chat'); }
     },
     bootstrap: async (): Promise<Bootstrap> => {
       const projectPaths = await readRegisteredPaths();

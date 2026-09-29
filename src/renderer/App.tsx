@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useState, type ClipboardEvent, type DragEvent, type FormEvent } from 'react';
 import QRCode from 'qrcode';
 import type {
   AssignmentMode,
@@ -8,6 +8,8 @@ import type {
   ConversationCandidate,
   ConversationTurn,
   ChatModelSettings,
+  ChatAttachment,
+  ChatFileInput,
   ExternalSession,
   EventType,
   ModelChoice,
@@ -29,6 +31,22 @@ import './styles.css';
 
 type Tab = 'chat' | 'overview' | 'tasks' | 'debate' | 'history';
 type Dialog = 'project' | 'task' | 'delete-project' | 'import-conversation' | 'imported-history' | 'transcript' | 'session-history' | 'chat-message' | null;
+const chatAttachments = (event: CollaborationEvent): ChatAttachment[] => {
+  try {
+    const value = JSON.parse(String(event.metadata?.attachments ?? '[]')) as unknown;
+    return Array.isArray(value) ? value.filter((item): item is ChatAttachment =>
+      !!item && typeof item === 'object' && typeof item.name === 'string' && typeof item.path === 'string' && typeof item.size === 'number') : [];
+  } catch { return []; }
+};
+const pendingFileName = (file: ChatFileInput): string => typeof file === 'string' ? file.split(/[\\/]/u).at(-1) ?? file : file.name;
+const durationLabel = (seconds: number): string => `${Math.floor(seconds / 60)}분 ${String(seconds % 60).padStart(2, '0')}초`;
+const encodeBrowserFile = (file: File): Promise<ChatFileInput> => new Promise((resolve, reject) => {
+  if (file.size > 25 * 1024 * 1024) { reject(new Error('첨부 파일은 각각 25MB 이하여야 합니다.')); return; }
+  const reader = new FileReader();
+  reader.onerror = () => reject(new Error(`${file.name || '이미지'} 파일을 읽지 못했습니다.`));
+  reader.onload = () => resolve({ name: file.name || `스크린샷-${Date.now()}.png`, data: String(reader.result).split(',')[1] ?? '' });
+  reader.readAsDataURL(file);
+});
 
 const statusLabel: Record<TaskStatus, string> = {
   draft: '초안',
@@ -108,12 +126,12 @@ function PairingQR({ url, token }: { url: string; token: string }) {
   return <div className="pairing-qr">{image && <img src={image} width="264" height="264" alt="아이폰 연결 QR 코드" />}<p className="subtle">아이폰 카메라로 스캔하면 모바일 화면이 바로 열립니다. Safari에서 공유 → 홈 화면에 추가를 누르면 아이콘으로 열 수 있습니다.</p></div>;
 }
 
-function SessionCard({ session, localHostId, onOpen, onOpenDesktop, onHistory }: { session: ExternalSession; localHostId: string; onOpen: (session: ExternalSession) => void; onOpenDesktop: (session: ExternalSession) => void; onHistory: (session: ExternalSession) => void }) {
+function SessionCard({ session, localHostId, onOpen, onOpenDesktop, onHandoff, onHistory }: { session: ExternalSession; localHostId: string; onOpen: (session: ExternalSession) => void; onOpenDesktop: (session: ExternalSession) => void; onHandoff: (session: ExternalSession) => void; onHistory: (session: ExternalSession) => void }) {
   const isLocal = session.hostId === localHostId;
   return <div className={'session-card ' + session.provider}>
     <div className="session-card-head"><span className={'model-chip ' + session.provider}>{providerLabel(session.provider)}</span><span className="badge neutral">{sessionPurposeLabel[session.purpose]}</span>{!isLocal && <span className="badge warning">다른 컴퓨터</span>}<span className="activity-time">{shortTime(session.updatedAt)}</span></div>
     <div className="session-id" title={session.sessionId}>{session.sessionId}</div>
-    <div className="session-actions"><button className="button small" type="button" onClick={() => onHistory(session)}>저장된 대화 보기</button><button className="button small" type="button" disabled={!isLocal} onClick={() => onOpen(session)}>{isLocal ? 'CLI에서 이어 열기 ↗' : '이 컴퓨터에서 열 수 없음'}</button><button className="button small" type="button" disabled={!isLocal} onClick={() => onOpenDesktop(session)} title={session.provider === 'claude' ? '현재 CLI 기록을 Claude Code 데스크톱에 사본으로 가져옵니다. 이후 CLI와 데스크톱 대화는 자동 동기화되지 않습니다.' : undefined}>{session.provider === 'codex' ? 'Codex 앱에서 보기 ↗' : 'Claude Code에 사본 가져오기 ↗'}</button></div>
+    <div className="session-actions"><button className="button small" type="button" disabled={!isLocal} onClick={() => onOpen(session)}>{isLocal ? 'CLI에서 이어 열기 ↗' : '이 컴퓨터에서 열 수 없음'}</button>{session.provider === 'claude' && <button className="button small" type="button" disabled={!isLocal} onClick={() => onHandoff(session)} title="터미널에서 대화를 이어 열고 /desktop 명령을 클립보드에 복사합니다. 붙여넣고 Enter를 누르세요.">Claude Code로 넘기기 ↗</button>}<button className="button small" type="button" onClick={() => onHistory(session)}>저장된 대화 보기</button><button className="button small" type="button" disabled={!isLocal} onClick={() => onOpenDesktop(session)} title={session.provider === 'claude' ? '현재 CLI 기록을 Claude Code 데스크톱에 사본으로 가져옵니다. 이후 CLI와 데스크톱 대화는 자동 동기화되지 않습니다.' : undefined}>{session.provider === 'codex' ? 'Codex 앱에서 보기 ↗' : 'Claude Code에 사본 가져오기 ↗'}</button></div>
   </div>;
 }
 
@@ -165,6 +183,11 @@ export default function App() {
   const [cancelBusy, setCancelBusy] = useState(false);
   const [cliBusy, setCliBusy] = useState<Provider | 'refresh' | null>(null);
   const [chatDraft, setChatDraft] = useState('');
+  const [chatFiles, setChatFiles] = useState<ChatFileInput[]>([]);
+  const [chatDiscussion, setChatDiscussion] = useState(false);
+  const [discussingMessageId, setDiscussingMessageId] = useState<string | null>(null);
+  const [clockMs, setClockMs] = useState(() => Date.now());
+  useEffect(() => { const timer = setInterval(() => setClockMs(Date.now()), 1000); return () => clearInterval(timer); }, []);
   const [chatTarget, setChatTarget] = useState<Provider | 'both'>('both');
   const [chatModels, setChatModels] = useState<Record<Provider, ChatModelSettings>>({ codex: { model: '', effort: '' }, claude: { model: '', effort: '' } });
   const [modelCatalogs, setModelCatalogs] = useState<ModelCatalog[]>([]);
@@ -669,6 +692,13 @@ export default function App() {
       notify(`${appName} 앱에 채팅을 열도록 요청했습니다.`);
     });
   };
+  const handoffClaudeSession = (session: ExternalSession): void => {
+    if (!project) return;
+    void perform('Claude 대화를 넘길 준비 중', async () => {
+      await window.collab.handoffClaudeSession(project.path, session.sessionId);
+      notify('터미널에서 Claude가 열리면 Ctrl+V로 /desktop을 붙여넣고 Enter를 누르세요.');
+    });
+  };
 
   const changeModel = (role: 'executor' | 'reviewer', field: keyof ModelChoice, value: string): void => {
     setTaskDraft((previous) => ({
@@ -679,17 +709,45 @@ export default function App() {
 
   const sendChat = (submitEvent: FormEvent<HTMLFormElement>): void => {
     submitEvent.preventDefault();
-    if (!project || !chatDraft.trim() || chatSending) return;
+    if (!project || (!chatDraft.trim() && !chatFiles.length) || chatSending) return;
     const projectPath = project.path;
     const message = chatDraft.trim();
     const target = chatTarget;
     const models = { ...chatModels };
+    const files = [...chatFiles];
     setChatSendingPaths((previous) => new Set([...previous, projectPath]));
     setChatDraft('');
-    void window.collab.sendProjectMessage(projectPath, message, target, models)
-      .then((next) => setSnapshot((current) => current?.project.path === projectPath ? next : current))
+    void window.collab.sendProjectMessage(projectPath, message, target, models, files, chatDiscussion)
+      .then((next) => { setSnapshot((current) => current?.project.path === projectPath ? next : current); setChatFiles([]); })
       .catch((error) => { setChatDraft((current) => current || message); notify(errorText(error), true); })
       .finally(() => setChatSendingPaths((previous) => new Set([...previous].filter((item) => item !== projectPath))));
+  };
+
+  const addBrowserFiles = (files: readonly File[]): void => {
+    if (!files.length) return;
+    void Promise.all(files.map(encodeBrowserFile)).then((encoded) => setChatFiles((current) => {
+      if (current.length + encoded.length > 5) { notify('첨부 파일은 최대 5개입니다.', true); return current; }
+      return [...current, ...encoded];
+    })).catch((error: unknown) => notify(errorText(error), true));
+  };
+  const dropChatFiles = (event: DragEvent<HTMLFormElement>): void => {
+    event.preventDefault();
+    addBrowserFiles([...event.dataTransfer.files]);
+  };
+  const pasteChatFiles = (event: ClipboardEvent<HTMLTextAreaElement>): void => {
+    const files = [...event.clipboardData.items].filter((item) => item.kind === 'file')
+      .map((item) => item.getAsFile()).filter((file): file is File => file !== null);
+    if (files.length) { event.preventDefault(); addBrowserFiles(files); }
+  };
+  const continueChatDiscussion = (messageId: string): void => {
+    if (!project || chatSending) return;
+    const projectPath = project.path;
+    setDiscussingMessageId(messageId);
+    setChatSendingPaths((previous) => new Set([...previous, projectPath]));
+    void window.collab.continueProjectDiscussion(projectPath, messageId)
+      .then((next) => setSnapshot((current) => current?.project.path === projectPath ? next : current))
+      .catch((error: unknown) => notify(errorText(error), true))
+      .finally(() => { setDiscussingMessageId(null); setChatSendingPaths((previous) => new Set([...previous].filter((item) => item !== projectPath))); });
   };
 
   const renderChat = () => (
@@ -701,23 +759,39 @@ export default function App() {
             || (item.actor === 'user' && (item.metadata?.target === 'both' || item.metadata?.target === provider))
             || (item.type === 'error' && item.metadata?.provider === provider));
           const latestRequest = visible.filter((item) => item.actor === 'user' && item.type === 'chat').at(-1);
-          const pending = !!latestRequest && Date.now() - Date.parse(latestRequest.timestamp) < 10 * 60_000
-            && !events.some((item) => item.metadata?.replyTo === latestRequest.id
-              && (item.actor === provider || item.type === 'error' && item.metadata?.provider === provider));
+          const pending = !!latestRequest && clockMs - Date.parse(latestRequest.timestamp) < 60 * 60_000
+            && (latestRequest.metadata?.discussion || discussingMessageId === latestRequest.id
+              ? !events.some((item) => item.metadata?.replyTo === latestRequest.id && item.metadata?.discussionConclusion)
+              : !events.some((item) => item.metadata?.replyTo === latestRequest.id
+                && (item.actor === provider || item.type === 'error' && item.metadata?.provider === provider)));
+          const elapsed = latestRequest ? Math.max(0, Math.floor((clockMs - Date.parse(latestRequest.timestamp)) / 1000)) : 0;
+          const samples = events.filter((item) => item.actor === provider && item.type === 'chat' && item.metadata?.replyTo)
+            .map((item) => {
+              const request = events.find((candidate) => candidate.id === item.metadata?.replyTo);
+              return request ? Math.floor((Date.parse(item.timestamp) - Date.parse(request.timestamp)) / 1000) : 0;
+            }).filter((seconds) => seconds >= 2 && seconds <= 3600).slice(-5).sort((left, right) => left - right);
+          const typical = samples.length ? samples[Math.floor(samples.length / 2)] : 0;
+          const discussionReplies = latestRequest ? events.filter((item) => item.metadata?.replyTo === latestRequest.id && typeof item.metadata?.discussionRound === 'number') : [];
+          const completedRound = [1, 2, 3, 4, 5, 6, 7, 8].filter((round) => ['codex', 'claude'].every((name) =>
+            discussionReplies.some((item) => item.actor === name && item.metadata?.discussionRound === round))).at(-1) ?? 0;
           return <section className={'panel chat-column ' + provider} key={provider} aria-label={`${providerLabel(provider)} 채팅`}>
             <div className="chat-column-head"><span className={'model-chip ' + provider}>{providerLabel(provider)}</span><span className="subtle">{visible.length}개 기록</span></div>
             <div className="chat-messages" aria-live="polite">
               {visible.length ? visible.map((item) => <article className={'chat-message ' + (item.actor === 'user' ? 'from-user' : item.type === 'error' ? 'from-error' : 'from-model')} key={item.id}>
-                <div className="chat-message-head"><strong>{actorLabel(item.actor)}</strong>{item.type !== 'chat' && <span className="badge neutral">{eventLabel[item.type]}</span>}{item.taskId && <span className="badge neutral">{tasks.find((task) => task.id === item.taskId)?.title ?? '업무'}</span>}{item.actor === 'user' && item.metadata?.target === 'both' && <span className="badge neutral">두 모델 모두</span>}{item.type === 'chat' && item.actor === provider && item.metadata?.model && <span className="badge neutral">{item.metadata.model}{item.metadata.effort && item.metadata.effort !== 'default' ? ` · ${item.metadata.effort}` : ''}</span>}<span className="activity-time">{shortTime(item.timestamp)}</span></div>
+                <div className="chat-message-head"><strong>{actorLabel(item.actor)}</strong>{item.type !== 'chat' && <span className="badge neutral">{eventLabel[item.type]}</span>}{item.metadata?.discussionRound && <span className="badge neutral">토론 {item.metadata.discussionRound}회차</span>}{item.taskId && <span className="badge neutral">{tasks.find((task) => task.id === item.taskId)?.title ?? '업무'}</span>}{item.actor === 'user' && item.metadata?.target === 'both' && <span className="badge neutral">두 모델 모두</span>}{item.type === 'chat' && item.actor === provider && item.metadata?.model && <span className="badge neutral">{item.metadata.model}{item.metadata.effort && item.metadata.effort !== 'default' ? ` · ${item.metadata.effort}` : ''}</span>}<span className="activity-time">{shortTime(item.timestamp)}</span></div>
                 <div className="chat-message-text">{item.message}</div>
+                {chatAttachments(item).length > 0 && <div className="chat-attachments">{chatAttachments(item).map((file) => <span className="badge neutral" key={file.path}>📎 {file.name} · {(file.size / 1024).toFixed(0)}KB</span>)}</div>}
+                {item.actor === 'user' && provider === 'codex' && item.metadata?.target === 'both' && !item.metadata?.discussion && !events.some((record) => record.metadata?.replyTo === item.id && record.metadata?.discussionConclusion)
+                  && ['codex', 'claude'].every((name) => events.some((record) => record.metadata?.replyTo === item.id && record.actor === name && record.type === 'chat'))
+                  && <button className="button small" type="button" disabled={chatSending} onClick={() => continueChatDiscussion(item.id)}>이 두 답변으로 토론 시작</button>}
                 <div className="chat-message-actions"><button className="button ghost small" type="button" onClick={() => { setExpandedChat(item); setDialog('chat-message'); }}>전체 보기</button>{item.metadata?.transcript && <button className="button ghost small" type="button" onClick={() => openTranscript(item)}>CLI 원문</button>}</div>
               </article>) : <Empty icon="◎" title="아직 대화가 없습니다" detail={`${providerLabel(provider)}에게 첫 메시지를 보내세요.`} />}
-              {pending && <article className="chat-message from-model pending" role="status"><strong>{providerLabel(provider)} 생각 중 · 응답 생성 중…</strong><div className="chat-message-text">답변이 완성되면 자동으로 표시됩니다.</div></article>}
+              {pending && <article className="chat-message from-model pending" role="status"><strong>{providerLabel(provider)} 생각 중 · 응답 생성 중…</strong><div className="chat-message-text">{latestRequest?.metadata?.discussion || discussingMessageId === latestRequest?.id ? `토론 ${Math.min(completedRound + 1, project?.defaultDebateRounds ?? 2)} / ${project?.defaultDebateRounds ?? 2}회차 · ` : ''}경과 {durationLabel(elapsed)} · {typical ? elapsed < typical ? `최근 응답 기준 예상 약 ${durationLabel(typical - elapsed)} 남음` : '최근 응답보다 오래 걸리는 중' : '완료 기록이 쌓이면 남은 시간을 예측합니다.'}<br />답변이 완성되면 자동으로 표시됩니다.</div></article>}
             </div>
           </section>;
         })}
       </div>
-      <form className="panel panel-pad chat-compose" onSubmit={sendChat}>
+      <form className="panel panel-pad chat-compose" onSubmit={sendChat} onDragOver={(event) => event.preventDefault()} onDrop={dropChatFiles}>
         <div className="panel-head"><div><h2>지시 또는 질문</h2><p className="subtle">보낼 대상을 선택하세요. 지시는 프로젝트 Git 기록에 저장되고 이후 해당 모델의 업무 단계에도 전달됩니다.</p></div></div>
         <div className="chat-targets" role="group" aria-label="메시지 받을 모델">
           {([{ value: 'both', label: '두 모델 모두' }, { value: 'codex', label: 'Codex만' }, { value: 'claude', label: 'Claude만' }] as const).map(({ value, label }) => <button type="button" key={value} className={'button ' + (chatTarget === value ? 'primary' : '')} aria-pressed={chatTarget === value} onClick={() => setChatTarget(value)}>{label}</button>)}
@@ -740,8 +814,10 @@ export default function App() {
             {catalog?.warning && <span className="chat-model-warning">{catalog.warning}</span>}
           </div>;
         })}</div>
-        <div className="field"><label htmlFor="project-chat-input">메시지</label><textarea id="project-chat-input" value={chatDraft} maxLength={20_000} rows={4} onChange={(event) => setChatDraft(event.target.value)} placeholder="진행 상황을 묻거나, 수정할 방향과 완료 기준을 알려 주세요." /></div>
-        <div className="chat-compose-actions"><span className="subtle">현재 실행 중인 CLI 호출에는 다음 단계부터 반영됩니다.</span><div className="session-actions">{chatSending && <button className="button danger" type="button" onClick={() => project && void window.collab.cancelProjectMessage(project.path)}>응답 중단</button>}<button className="button primary" type="submit" disabled={!chatDraft.trim() || chatSending}>{chatSending ? '답변 받는 중…' : '메시지 보내기'}</button></div></div>
+        <div className="field"><label htmlFor="project-chat-input">메시지</label><textarea id="project-chat-input" value={chatDraft} maxLength={20_000} rows={4} onChange={(event) => setChatDraft(event.target.value)} onPaste={pasteChatFiles} placeholder="메시지 입력 · 이미지 여러 개 드래그 또는 Ctrl+V로 스크린샷 붙여넣기" /></div>
+        <label className="chat-discussion-toggle"><input type="checkbox" checked={chatDiscussion} disabled={chatTarget !== 'both'} onChange={(event) => setChatDiscussion(event.target.checked)} />두 모델이 서로 반론하며 토론하기 · 기본 {project?.defaultDebateRounds ?? 2}회 왕복</label>
+        <div className="chat-attachments"><button className="button small" type="button" disabled={chatSending || chatFiles.length >= 5} onClick={() => void window.collab.chooseChatFiles().then((chosen) => setChatFiles((current) => [...current, ...chosen].slice(0, 5))).catch((error: unknown) => notify(errorText(error), true))}>＋ 이미지·파일 첨부</button>{chatFiles.map((file, index) => <button className="button ghost small" type="button" key={`${pendingFileName(file)}-${index}`} title={pendingFileName(file)} onClick={() => setChatFiles((current) => current.filter((_, position) => position !== index))}>📎 {pendingFileName(file)} ×</button>)}</div>
+        <div className="chat-compose-actions"><span className="subtle">첨부 파일은 프로젝트 Git에 저장되고 두 모델에 같은 경로로 전달됩니다. 파일당 25MB, 총 50MB · 5개까지.</span><div className="session-actions">{chatSending && <button className="button danger" type="button" onClick={() => project && void window.collab.cancelProjectMessage(project.path)}>응답 중단</button>}<button className="button primary" type="submit" disabled={(!chatDraft.trim() && !chatFiles.length) || chatSending}>{chatSending ? '답변 받는 중…' : '메시지 보내기'}</button></div></div>
       </form>
     </div>
   );
@@ -755,7 +831,7 @@ export default function App() {
       </div>
       <div className="panel panel-pad">
         <div className="panel-head"><div><h2>프로젝트 모델 채팅</h2><p className="subtle">이 컴퓨터에서 만든 CLI 채팅은 이어 열 수 있습니다. Claude Code 데스크톱으로 가져오면 그 시점의 사본이 생성되며 이후 답변은 자동 동기화되지 않습니다.</p></div><span className="badge neutral">{project?.sessions?.length ?? 0}개 기록</span></div>
-        {project?.sessions?.length ? <div className="session-grid">{project.sessions.map((session) => <SessionCard key={`${session.hostId}:${session.sessionId}`} session={session} localHostId={snapshot?.localHostId ?? ''} onOpen={openSession} onOpenDesktop={openDesktopSession} onHistory={viewSessionHistory} />)}</div>
+        {project?.sessions?.length ? <div className="session-grid">{project.sessions.map((session) => <SessionCard key={`${session.hostId}:${session.sessionId}`} session={session} localHostId={snapshot?.localHostId ?? ''} onOpen={openSession} onOpenDesktop={openDesktopSession} onHandoff={handoffClaudeSession} onHistory={viewSessionHistory} />)}</div>
           : <div className="session-empty">CLI 채팅이 아직 없습니다. CLI 로그인 상태와 전체 이력의 오류를 확인한 뒤 새로고침해 다시 시도하세요.</div>}
       </div>
       <div className="panel panel-pad">
@@ -826,7 +902,7 @@ export default function App() {
                 {!!task.sourceConversationIds?.length && <span>참고 대화 {task.sourceConversationIds.length}개</span>}
               </div>
               <div className="model-pair" style={{ marginTop: 9 }}><ModelChip choice={task.executor} /><span>실행 → 검수</span><ModelChip choice={task.reviewer} /></div>
-              {!!task.sessions?.length && <details className="task-sessions"><summary>별도 CLI 채팅 {task.sessions.length}개</summary><div className="session-grid">{task.sessions.map((session) => <SessionCard key={`${session.hostId}:${session.sessionId}`} session={session} localHostId={snapshot?.localHostId ?? ''} onOpen={openSession} onOpenDesktop={openDesktopSession} onHistory={viewSessionHistory} />)}</div></details>}
+              {!!task.sessions?.length && <details className="task-sessions"><summary>별도 CLI 채팅 {task.sessions.length}개</summary><div className="session-grid">{task.sessions.map((session) => <SessionCard key={`${session.hostId}:${session.sessionId}`} session={session} localHostId={snapshot?.localHostId ?? ''} onOpen={openSession} onOpenDesktop={openDesktopSession} onHandoff={handoffClaudeSession} onHistory={viewSessionHistory} />)}</div></details>}
               {task.reviewSummary && <p className="subtle" style={{ marginTop: 8 }}>검수: {task.reviewSummary.slice(0, 150)}</p>}
             </div>
             <div className="task-controls">

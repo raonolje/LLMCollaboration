@@ -196,6 +196,7 @@ export type CliRequest = Readonly<{
   signal: AbortSignal;
   sessionId?: string;
   configuredPath?: string;
+  imagePaths?: string[];
 }>;
 
 export type CliResult = Readonly<{
@@ -210,8 +211,9 @@ export const cliArguments = (request: CliRequest): string[] => {
   const effortArgs = request.effort
     ? request.choice.provider === 'codex' ? ['--config', `model_reasoning_effort="${request.effort}"`] : ['--effort', request.effort]
     : [];
+  const imageArgs = (request.imagePaths ?? []).flatMap((file) => ['--image', file]);
   return request.choice.provider === 'codex'
-    ? ['exec', '--json', '--cd', request.cwd, '--sandbox', request.readOnly ? 'read-only' : 'workspace-write', ...modelArgs, ...effortArgs, ...(request.sessionId ? ['resume', request.sessionId, '-'] : ['-'])]
+    ? ['exec', '--json', '--cd', request.cwd, '--sandbox', request.readOnly ? 'read-only' : 'workspace-write', ...modelArgs, ...effortArgs, ...(request.sessionId ? ['resume', ...imageArgs, request.sessionId, '-'] : [...imageArgs, '-'])]
     : ['-p', '--verbose', '--output-format', 'stream-json', '--permission-mode', request.readOnly ? 'plan' : 'acceptEdits', '--permission-prompts', 'none', '--tools', request.readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash', ...modelArgs, ...effortArgs, ...(request.sessionId ? ['--resume', request.sessionId] : []), 'Follow the full task instructions supplied on standard input.'];
 };
 
