@@ -1,9 +1,9 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { networkInterfaces } from 'node:os';
+import { homedir, networkInterfaces } from 'node:os';
 import path from 'node:path';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import type { ChatModelSettings, CollaborationEvent, DebateFollowUp, Provider, RemoteStatus, TaskInput } from '../shared/types';
+import type { ChatModelSettings, CollaborationEvent, DebateFollowUp, ProjectInput, Provider, RemoteStatus, TaskInput } from '../shared/types';
 import type { Service } from './services';
 
 type Settings = { enabled: boolean; token: string };
@@ -48,6 +48,8 @@ const tailnetAddress = (): string | undefined => Object.entries(networkInterface
   .flatMap(([, addresses]) => addresses ?? [])
   .find((address) => address.family === 'IPv4' && !address.internal)?.address;
 const message = (error: unknown): string => error instanceof Error ? error.message : String(error);
+const projectBasePath = (): string => path.join(homedir(), 'Documents', 'LLM Collaboration');
+const projectFolderName = (name: string): string => name.normalize('NFKC').replace(/[<>:"/\\|?*\u0000-\u001f]/gu, '-').replace(/[. ]+$/u, '').trim().slice(0, 60) || 'project';
 
 export const createRemote = (service: Service, userData: string, options: { address?: string; port?: number; webRoot?: string } = {}) => {
   const settingsFile = path.join(userData, 'remote-settings.json');
@@ -127,6 +129,30 @@ export const createRemote = (service: Service, userData: string, options: { addr
       if (request.method === 'GET' && url.pathname === '/v1/projects') {
         json(response, 200, { projects: await service.listProjects() }); return;
       }
+      if (request.method === 'GET' && url.pathname === '/v1/project-defaults') {
+        json(response, 200, { basePath: projectBasePath() }); return;
+      }
+      if (request.method === 'GET' && url.pathname === '/v1/conversations') {
+        json(response, 200, { conversations: await service.listLocalConversations() }); return;
+      }
+      if (request.method === 'POST' && url.pathname === '/v1/projects') {
+        const body = object(await readBody(request));
+        const name = text(body.name, 120);
+        const goal = text(body.goal);
+        const requestedPath = body.path === undefined || body.path === '' ? undefined : text(body.path, 1_000);
+        const directory = requestedPath ?? path.join(projectBasePath(), `${projectFolderName(name)}-${randomBytes(3).toString('hex')}`);
+        if (!path.isAbsolute(directory) || path.parse(directory).root === path.resolve(directory)) throw new Error('PC의 프로젝트 폴더 절대 경로를 입력하세요.');
+        const rounds = Number(body.defaultDebateRounds ?? 2);
+        if (!Number.isInteger(rounds) || rounds < 1 || rounds > 8) throw new Error('기본 토론 왕복 횟수는 1~8회입니다.');
+        const selected = body.initialConversation ? object(body.initialConversation) : undefined;
+        const initialConversation = selected && (selected.provider === 'codex' || selected.provider === 'claude')
+          ? (await service.listLocalConversations()).find((candidate) => candidate.provider === selected.provider && candidate.filePath === selected.filePath)
+          : undefined;
+        if (selected && !initialConversation) throw new Error('이 PC에서 확인된 기존 채팅을 선택하세요.');
+        const input: ProjectInput = { name, goal, path: directory, defaultDebateRounds: rounds,
+          ...(initialConversation ? { initialConversation: { provider: initialConversation.provider, filePath: initialConversation.filePath } } : {}) };
+        json(response, 201, await service.createProject(input)); return;
+      }
       if (request.method === 'GET' && url.pathname === '/v1/models') {
         json(response, 200, { catalogs: await service.refreshModelCatalogs() }); return;
       }
@@ -141,7 +167,47 @@ export const createRemote = (service: Service, userData: string, options: { addr
       }
       if (request.method !== 'POST') { json(response, 405, { error: '지원하지 않는 요청입니다.' }); return; }
       const action = segments[3];
-      const body = object(await readBody(request, action === 'chat' ? 70_000_000 : 128_000));
+      const body = object(await readBody(request, action === 'chat' || action === 'chat-task' ? 70_000_000 : 128_000));
+      if (action === 'delete') {
+        const confirmation = text(body.confirmation, 120);
+        if (body.mode === 'unregister') {
+          await service.unregisterProjectOnly(directory, id, confirmation);
+          json(response, 200, { result: 'unregistered' }); return;
+        }
+        if (body.mode === 'trash') {
+          json(response, 200, { result: await service.deleteProject(directory, id, confirmation) }); return;
+        }
+        throw new Error('프로젝트 삭제 방식을 선택하세요.');
+      }
+      if (action === 'chat-task') {
+        const executor = target(body.target);
+        if (executor === 'both') throw new Error('업무 담당 모델을 Codex 또는 Claude로 선택하세요.');
+        const reviewer: Provider = executor === 'codex' ? 'claude' : 'codex';
+        const chatMessage = text(body.message);
+        const files = body.files ?? [];
+        if (!Array.isArray(files) || files.length > 5 || files.some((file) => !file || typeof file !== 'object'
+          || typeof file.name !== 'string' || typeof file.data !== 'string')) throw new Error('첨부 파일은 최대 5개입니다.');
+        const models = object(body.models ?? {});
+        const choices = Object.fromEntries((['codex', 'claude'] as Provider[])
+          .filter((provider) => models[provider]).map((provider) => [provider, models[provider]])) as Partial<Record<Provider, ChatModelSettings>>;
+        json(response, 202, launch('chat-task', id, async () => {
+          const attached = files.length ? await service.sendProjectMessage(directory, chatMessage, executor, choices, files, false) : undefined;
+          const attachmentEvent = attached?.events.filter((event) => event.type === 'chat' && event.actor === 'user').at(-1);
+          const attachmentPaths = typeof attachmentEvent?.metadata?.attachments === 'string'
+            ? (JSON.parse(attachmentEvent.metadata.attachments) as Array<{ path: string }>).map((file) => file.path).join('\n') : '';
+          const title = chatMessage.split(/\r?\n/u).find((line) => line.trim())?.trim().slice(0, 80) ?? '채팅 업무';
+          const taskInput: TaskInput = { title, description: [chatMessage, attachmentPaths && `첨부 자료 경로 (프로젝트 폴더 기준):\n${attachmentPaths}`].filter(Boolean).join('\n\n'),
+            acceptanceCriteria: ['요청한 결과를 프로젝트 폴더에 저장하고, 상대 모델이 요구사항 충족 여부를 확인한다.'],
+            mode: 'manual', executor: { provider: executor, model: choices[executor]?.model ?? '', effort: choices[executor]?.effort ?? '' },
+            reviewer: { provider: reviewer, model: choices[reviewer]?.model ?? '', effort: choices[reviewer]?.effort ?? '' },
+            dependsOn: [], debateRounds: (await service.openProject(directory)).project.defaultDebateRounds };
+          const created = await service.createTask(directory, taskInput);
+          const task = created.tasks.at(-1);
+          if (!task) throw new Error('생성된 업무를 찾을 수 없습니다.');
+          await service.runDebate(directory, task.id);
+          await service.executeTask(directory, task.id);
+        }, { target: executor })); return;
+      }
       if (action === 'chat') {
         const chatTarget = target(body.target);
         const models = object(body.models ?? {});

@@ -16,9 +16,20 @@ describe('remote companion', () => {
     await mkdir(webRoot);
     await writeFile(path.join(webRoot, 'index.html'), '<head></head><h1>Mobile connection</h1>');
     const sendProjectMessage = vi.fn(async () => ({ project: { id: 'project-1' }, tasks: [], events: [] }));
+    const createProject = vi.fn(async (input: { path: string; name: string }) => ({ project: { id: 'created', ...input }, tasks: [], events: [] }));
+    const createTask = vi.fn(async () => ({ tasks: [{ id: 'task-1' }] }));
+    const runDebate = vi.fn(async () => undefined);
+    const executeTask = vi.fn(async () => undefined);
+    const unregisterProjectOnly = vi.fn(async () => undefined);
     const service = {
       listProjects: async () => [{ id: 'project-1', name: 'Project', path: directory }],
-      openProject: async () => ({ project: { id: 'project-1', name: 'Project', path: directory }, tasks: [], events: [] }),
+      openProject: async () => ({ project: { id: 'project-1', name: 'Project', path: directory, defaultDebateRounds: 2 }, tasks: [], events: [] }),
+      createProject,
+      listLocalConversations: async () => [{ provider: 'codex', filePath: path.join(directory, 'session.jsonl'), sessionId: 'session-1', title: 'Past chat', updatedAt: '2026-09-30T00:00:00.000Z', turnCount: 5 }],
+      createTask,
+      runDebate,
+      executeTask,
+      unregisterProjectOnly,
       sendProjectMessage,
     } as unknown as Service;
     const remote = createRemote(service, directory, { address: '127.0.0.1', port: 0, webRoot });
@@ -41,6 +52,22 @@ describe('remote companion', () => {
       expect(new TextDecoder().decode((await reader?.read())?.value)).toContain('connected');
       const projects = await fetch(`${status.url}/v1/projects`, { headers });
       expect((await projects.json() as { projects: { id: string }[] }).projects[0].id).toBe('project-1');
+      const defaults = await fetch(`${status.url}/v1/project-defaults`, { headers });
+      expect((await defaults.json() as { basePath: string }).basePath).toContain('LLM Collaboration');
+      const conversations = await fetch(`${status.url}/v1/conversations`, { headers });
+      expect((await conversations.json() as { conversations: Array<{ title: string }> }).conversations[0].title).toBe('Past chat');
+      const created = await fetch(`${status.url}/v1/projects`, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'Phone project', goal: 'Create from iPhone', path: path.join(directory, 'phone-project'), defaultDebateRounds: 3 }) });
+      expect(created.status).toBe(201);
+      expect((await created.json() as { project: { id: string } }).project.id).toBe('created');
+      expect(createProject).toHaveBeenCalledWith({ name: 'Phone project', goal: 'Create from iPhone', path: path.join(directory, 'phone-project'), defaultDebateRounds: 3 });
+      const invalidFolder = await fetch(`${status.url}/v1/projects`, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'Bad path', goal: 'Reject relative path', path: 'relative-folder' }) });
+      expect(invalidFolder.status).toBe(422);
+      const unregistered = await fetch(`${status.url}/v1/projects/project-1/delete`, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirmation: 'Project', mode: 'unregister' }) });
+      expect(unregistered.status).toBe(200);
+      expect(unregisterProjectOnly).toHaveBeenCalledWith(directory, 'project-1', 'Project');
       const unknown = await fetch(`${status.url}/v1/projects/other`, { headers });
       expect(unknown.status).toBe(422);
       const sent = await fetch(`${status.url}/v1/projects/project-1/chat`, {
@@ -58,6 +85,11 @@ describe('remote companion', () => {
       });
       expect(attached.status).toBe(202);
       await vi.waitFor(() => expect(sendProjectMessage).toHaveBeenCalledWith(directory, '', 'both', {}, [mobileFile], false));
+      const taskRequest = await fetch(`${status.url}/v1/projects/project-1/chat-task`, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: 'Build a mobile screen', target: 'claude', models: {} }) });
+      expect(taskRequest.status).toBe(202);
+      await vi.waitFor(() => expect(createTask).toHaveBeenCalledWith(directory, expect.objectContaining({ title: 'Build a mobile screen', executor: expect.objectContaining({ provider: 'claude' }) })));
+      await vi.waitFor(() => expect(executeTask).toHaveBeenCalledWith(directory, 'task-1'));
       const rotated = await remote.rotateToken();
       expect(rotated.token).not.toBe(status.token);
       expect((await fetch(`${status.url}/v1/projects`, { headers })).status).toBe(401);

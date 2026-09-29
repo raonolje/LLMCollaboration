@@ -3,7 +3,8 @@ import { Platform } from 'react-native';
 
 export type Provider = 'codex' | 'claude';
 export type Target = Provider | 'both';
-export type Project = { id: string; name: string; goal: string; path: string; defaultDebateRounds: number };
+export type Project = { id: string; name: string; goal: string; path: string; charter?: string; defaultDebateRounds: number };
+export type ConversationCandidate = { provider: Provider; sessionId: string; filePath: string; title: string; updatedAt: string; turnCount: number };
 export type Event = { id: string; actor: Provider | 'user' | 'system'; type: string; message: string; timestamp: string; taskId?: string; metadata?: Record<string, string> };
 export type Task = { id: string; title: string; description: string; status: string; executor: { provider: Provider; model: string }; reviewer: { provider: Provider; model: string }; debateRounds: number };
 export type Snapshot = { project: Project; tasks: Task[]; events: Event[] };
@@ -34,7 +35,7 @@ export const saveConnection = async (connection: Connection | null): Promise<voi
 };
 export const request = async <T>(connection: Connection, route: string, body?: unknown): Promise<T> => {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), route.endsWith('/chat') ? 120_000 : 30_000);
+  const timeout = setTimeout(() => controller.abort(), route.endsWith('/chat') || route === '/projects' && body !== undefined ? 180_000 : 30_000);
   try {
     const response = await fetch(`${connection.url.replace(/\/$/u, '')}/v1${route}`, {
       method: body === undefined ? 'GET' : 'POST',

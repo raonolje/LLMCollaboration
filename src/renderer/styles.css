@@ -230,6 +230,27 @@ p { margin: 0; }
 .chat-models { margin-bottom: 15px; }
 .chat-model-warning { color: #a36a2b !important; line-height: 1.5; }
 .chat-compose-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 15px; }
+.main.has-chat-dock .content { padding-bottom: min(55vh, 490px); }
+.main.has-chat-dock.collapsed .content { padding-bottom: 90px; }
+.chat-dock { position: fixed; left: 248px; right: 0; bottom: 0; z-index: 20; background: #fff; border-top: 1px solid #dfe5f0; box-shadow: 0 -8px 24px #14244816; max-height: 55vh; overflow-y: auto; }
+.chat-dock.collapsed { max-height: 50px; overflow: hidden; }
+.chat-dock-toggle { width: 100%; min-height: 38px; padding: 7px 24px; border: 0; background: #eef1ff; color: #4c61d0; text-align: left; font-size: 12px; font-weight: 800; }
+.chat-dock-toggle:hover { background: #e4e9ff; }
+.chat-dock.is-dragging { outline: 3px dashed #5266e9; outline-offset: -4px; }
+.chat-compose { max-width: 1410px; margin: 0 auto; padding: 12px 24px 16px; }
+.chat-compose .panel-head { display: none; }
+.chat-compose .chat-targets { margin-bottom: 8px; }
+.chat-compose .field textarea { min-height: 58px; }
+.chat-compose-settings { margin-top: 8px; color: #5268da; font-size: 12px; font-weight: 700; }
+.chat-compose-settings summary { width: fit-content; cursor: pointer; padding: 5px 0; }
+.chat-compose-settings[open] { padding: 9px 0; }
+.chat-compose .chat-compose-actions { margin-top: 8px; }
+.chat-compose .chat-compose-actions > .subtle { max-width: 560px; }
+.chat-message-text, .debate-content, .search-result p { max-height: 190px; overflow: hidden; }
+.chat-message-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 8; }
+.debate-content { max-height: 210px; }
+.search-result p { white-space: pre-wrap; line-height: 1.65; overflow-wrap: anywhere; }
+.chat-message-text.expanded, .debate-content.expanded, .search-result p.expanded { display: block; max-height: none; overflow: visible; -webkit-line-clamp: unset; }
 @media (max-width: 760px) { .chat-grid { grid-template-columns: 1fr; } .chat-messages { height: 320px; } .chat-compose-actions { align-items: flex-start; flex-direction: column; } }
 .pairing-qr { display: flex; align-items: center; gap: 16px; padding: 16px; border: 1px solid #dfe5f0; border-radius: 14px; background: #f8faff; }
 .pairing-qr img { flex: none; width: 220px; height: 220px; background: white; border-radius: 8px; }

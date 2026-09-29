@@ -195,6 +195,8 @@ export default function App() {
   const [cancelBusy, setCancelBusy] = useState(false);
   const [cliBusy, setCliBusy] = useState<Provider | 'refresh' | null>(null);
   const [chatDraft, setChatDraft] = useState('');
+  const [composerOpen, setComposerOpen] = useState(true);
+  const [expandedRecordIds, setExpandedRecordIds] = useState<string[]>([]);
   const [chatFiles, setChatFiles] = useState<ChatFileInput[]>([]);
   const [chatDragActive, setChatDragActive] = useState(false);
   const [chatDiscussion, setChatDiscussion] = useState(false);
@@ -842,6 +844,52 @@ export default function App() {
       .finally(() => { setDiscussingMessageId(null); setChatSendingPaths((previous) => new Set([...previous].filter((item) => item !== projectPath))); });
   };
 
+  const toggleRecord = (id: string): void => setExpandedRecordIds((current) => current.includes(id)
+    ? current.filter((recordId) => recordId !== id) : [...current, id]);
+
+  const renderComposer = () => (
+    <div className={`chat-dock${composerOpen ? '' : ' collapsed'}${chatDragActive ? ' is-dragging' : ''}`}
+      onDragOver={(event) => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setChatDragActive(true); } }}
+      onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setChatDragActive(false); }}
+      onDrop={dropChatFiles}>
+      <button type="button" className="chat-dock-toggle" aria-expanded={composerOpen} onClick={() => setComposerOpen((open) => !open)}>
+        {composerOpen ? '대화 입력 접기 ▾' : `대화 입력 열기 ▴${chatDraft.trim() ? ' · 작성 중' : ''}`}
+      </button>
+      {chatDragActive && <div className="chat-drop-hint" aria-hidden="true">이미지·파일을 놓아 첨부하기</div>}
+      {composerOpen && (
+      <form className="chat-compose" onSubmit={sendChat}>
+        <div className="panel-head"><div><h2>지시 또는 질문</h2><p className="subtle">보낼 대상을 선택하세요. 지시는 프로젝트 Git 기록에 저장되고 이후 해당 모델의 업무 단계에도 전달됩니다.</p></div></div>
+        <div className="chat-targets" role="group" aria-label="메시지 받을 모델">
+          {([{ value: 'both', label: '두 모델 모두' }, { value: 'codex', label: 'Codex만' }, { value: 'claude', label: 'Claude만' }] as const).map(({ value, label }) => <button type="button" key={value} className={'button ' + (chatTarget === value ? 'primary' : '')} aria-pressed={chatTarget === value} onClick={() => setChatTarget(value)}>{label}</button>)}
+        </div>
+        <div className="field"><label htmlFor="project-chat-input">메시지</label><textarea id="project-chat-input" value={chatDraft} maxLength={20_000} rows={2} onChange={(event) => setChatDraft(event.target.value)} onPaste={pasteChatFiles} placeholder="모든 탭에서 지시 입력 · 이미지 드래그 또는 Ctrl+V 붙여넣기" /></div>
+        <details className="chat-compose-settings"><summary>모델·추론·토론 설정</summary>
+        <div className="chat-model-heading"><strong>모델과 추론 수준</strong><button className="button ghost small" type="button" disabled={modelBusy} onClick={() => void refreshModelCatalogs()}>{modelBusy ? '목록 확인 중…' : '↻ 모델 목록 새로고침'}</button></div>
+        <div className="form-grid chat-models">{(['codex', 'claude'] as Provider[]).map((provider) => {
+          const catalog = modelCatalogs.find((item) => item.provider === provider);
+          const settings = chatModels[provider];
+          const selected = catalog?.models.find((item) => item.id === settings.model);
+          const disabled = chatTarget !== 'both' && chatTarget !== provider;
+          return <div className="field" key={provider}><label htmlFor={`chat-model-${provider}`}>{providerLabel(provider)} 모델</label>
+            <select id={`chat-model-${provider}`} value={settings.model} disabled={disabled || modelBusy} onChange={(event) => setChatModels((current) => ({ ...current, [provider]: { model: event.target.value, effort: '' } }))}>
+              <option value="">CLI 기본 모델</option>{catalog?.models.map((item) => <option key={item.id} value={item.id}>{item.label}{item.requiresCredits ? ' · 추가 크레딧 사용 가능성' : ''}</option>)}
+            </select>
+            <label htmlFor={`chat-effort-${provider}`}>추론 수준</label>
+            <select id={`chat-effort-${provider}`} value={settings.effort} disabled={disabled || !selected} onChange={(event) => setChatModels((current) => ({ ...current, [provider]: { ...current[provider], effort: event.target.value } }))}>
+              <option value="">CLI 기본 수준</option>{selected?.efforts.map((effort) => <option key={effort} value={effort}>{effort}{selected.defaultEffort === effort ? ' · 기본값' : ''}</option>)}
+            </select>
+            <span>{catalog ? `${catalog.source} · ${catalog.cliVersion}` : '모델 목록을 확인하고 있습니다.'}</span>
+            {catalog?.warning && <span className="chat-model-warning">{catalog.warning}</span>}
+          </div>;
+        })}</div>
+        <label className="chat-discussion-toggle"><input type="checkbox" checked={chatDiscussion} disabled={chatTarget !== 'both'} onChange={(event) => setChatDiscussion(event.target.checked)} />두 모델이 서로 반론하며 토론하기 · 기본 {project?.defaultDebateRounds ?? 2}회 왕복</label>
+        </details>
+        <div className="chat-attachments"><button className="button small" type="button" disabled={chatSending || chatFiles.length >= 5} onClick={() => void window.collab.chooseChatFiles().then((chosen) => setChatFiles((current) => [...current, ...chosen].slice(0, 5))).catch((error: unknown) => notify(errorText(error), true))}>＋ 이미지·파일 첨부</button>{chatFiles.map((file, index) => <button className="button ghost small" type="button" key={`${pendingFileName(file)}-${index}`} title={pendingFileName(file)} onClick={() => setChatFiles((current) => current.filter((_, position) => position !== index))}>📎 {pendingFileName(file)} ×</button>)}</div>
+        <div className="chat-compose-actions"><span className="subtle">첨부 파일은 프로젝트 Git에 저장됩니다. 업무는 Codex만 또는 Claude만을 선택해 각각 요청하세요. 완료되면 상대 모델이 검수합니다. 파일당 25MB, 총 50MB · 5개까지.</span><div className="session-actions">{chatSending && <button className="button danger" type="button" onClick={() => project && void window.collab.cancelProjectMessage(project.path)}>응답 중단</button>}<button className="button" type="button" disabled={!chatDraft.trim() || chatSending || chatTarget === 'both'} onClick={requestChatTask}>선택한 모델에 업무 요청</button><button className="button primary" type="submit" disabled={(!chatDraft.trim() && !chatFiles.length) || chatSending}>{chatSending ? '진행 중…' : '메시지 보내기'}</button></div></div>
+      </form>
+      )}
+    </div>
+  );
   const renderChat = () => (
     <div className={`section-stack chat-drop-area${chatDragActive ? ' is-dragging' : ''}`}
       onDragOver={(event) => {
@@ -882,46 +930,18 @@ export default function App() {
             <div className="chat-messages" aria-live="polite">
               {visible.length ? visible.map((item) => <article className={'chat-message ' + (item.actor === 'user' ? 'from-user' : item.type === 'error' ? 'from-error' : 'from-model')} key={item.id}>
                 <div className="chat-message-head"><strong>{actorLabel(item.actor)}</strong>{item.type !== 'chat' && <span className="badge neutral">{item.metadata?.taskRequest ? '업무 요청' : eventLabel[item.type]}</span>}{item.metadata?.discussionRound && <span className="badge neutral">토론 {item.metadata.discussionRound}회차</span>}{item.taskId && <span className="badge neutral">{tasks.find((task) => task.id === item.taskId)?.title ?? '업무'}</span>}{item.actor === 'user' && item.metadata?.target === 'both' && <span className="badge neutral">두 모델 모두</span>}{item.type === 'chat' && item.actor === provider && item.metadata?.model && <span className="badge neutral">{item.metadata.model}{item.metadata.effort && item.metadata.effort !== 'default' ? ` · ${item.metadata.effort}` : ''}</span>}<span className="activity-time">{shortTime(item.timestamp)}</span></div>
-                <div className="chat-message-text">{item.message}</div>
+                <div className={`chat-message-text${expandedRecordIds.includes(item.id) ? ' expanded' : ''}`}>{item.message}</div>
                 {chatAttachments(item).length > 0 && <div className="chat-attachments">{chatAttachments(item).map((file) => <span className="badge neutral" key={file.path}>📎 {file.name} · {(file.size / 1024).toFixed(0)}KB</span>)}</div>}
                 {item.actor === 'user' && provider === 'codex' && item.metadata?.target === 'both' && !item.metadata?.discussion && !events.some((record) => record.metadata?.replyTo === item.id && record.metadata?.discussionConclusion)
                   && ['codex', 'claude'].every((name) => events.some((record) => record.metadata?.replyTo === item.id && record.actor === name && record.type === 'chat'))
                   && <button className="button small" type="button" disabled={chatSending} onClick={() => continueChatDiscussion(item.id)}>이 두 답변으로 토론 시작</button>}
-                <div className="chat-message-actions"><button className="button ghost small" type="button" onClick={() => { setExpandedChat(item); setDialog('chat-message'); }}>전체 보기</button>{item.metadata?.transcript && <button className="button ghost small" type="button" onClick={() => openTranscript(item)}>CLI 원문</button>}</div>
+                <div className="chat-message-actions">{item.message.length > 280 && <button className="button ghost small" type="button" onClick={() => toggleRecord(item.id)}>{expandedRecordIds.includes(item.id) ? '접기' : '펼치기'}</button>}<button className="button ghost small" type="button" onClick={() => { setExpandedChat(item); setDialog('chat-message'); }}>전체 보기</button>{item.metadata?.transcript && <button className="button ghost small" type="button" onClick={() => openTranscript(item)}>CLI 원문</button>}</div>
               </article>) : <Empty icon="◎" title="아직 대화가 없습니다" detail={`${providerLabel(provider)}에게 첫 메시지를 보내세요.`} />}
               {pending && <article className="chat-message from-model pending" role="status"><strong>{providerLabel(provider)} 생각 중 · 응답 생성 중…</strong><div className="chat-message-text">{latestRequest?.metadata?.discussion || discussingMessageId === latestRequest?.id ? `토론 ${Math.min(completedRound + 1, project?.defaultDebateRounds ?? 2)} / ${project?.defaultDebateRounds ?? 2}회차 · ` : ''}경과 {durationLabel(elapsed)} · {typical ? elapsed < typical ? `최근 응답 기준 예상 약 ${durationLabel(typical - elapsed)} 남음` : '최근 응답보다 오래 걸리는 중' : '완료 기록이 쌓이면 남은 시간을 예측합니다.'}<br />답변이 완성되면 자동으로 표시됩니다.</div></article>}
             </div>
           </section>;
         })}
       </div>
-      <form className="panel panel-pad chat-compose" onSubmit={sendChat}>
-        <div className="panel-head"><div><h2>지시 또는 질문</h2><p className="subtle">보낼 대상을 선택하세요. 지시는 프로젝트 Git 기록에 저장되고 이후 해당 모델의 업무 단계에도 전달됩니다.</p></div></div>
-        <div className="chat-targets" role="group" aria-label="메시지 받을 모델">
-          {([{ value: 'both', label: '두 모델 모두' }, { value: 'codex', label: 'Codex만' }, { value: 'claude', label: 'Claude만' }] as const).map(({ value, label }) => <button type="button" key={value} className={'button ' + (chatTarget === value ? 'primary' : '')} aria-pressed={chatTarget === value} onClick={() => setChatTarget(value)}>{label}</button>)}
-        </div>
-        <div className="chat-model-heading"><strong>모델과 추론 수준</strong><button className="button ghost small" type="button" disabled={modelBusy} onClick={() => void refreshModelCatalogs()}>{modelBusy ? '목록 확인 중…' : '↻ 모델 목록 새로고침'}</button></div>
-        <div className="form-grid chat-models">{(['codex', 'claude'] as Provider[]).map((provider) => {
-          const catalog = modelCatalogs.find((item) => item.provider === provider);
-          const settings = chatModels[provider];
-          const selected = catalog?.models.find((item) => item.id === settings.model);
-          const disabled = chatTarget !== 'both' && chatTarget !== provider;
-          return <div className="field" key={provider}><label htmlFor={`chat-model-${provider}`}>{providerLabel(provider)} 모델</label>
-            <select id={`chat-model-${provider}`} value={settings.model} disabled={disabled || modelBusy} onChange={(event) => setChatModels((current) => ({ ...current, [provider]: { model: event.target.value, effort: '' } }))}>
-              <option value="">CLI 기본 모델</option>{catalog?.models.map((item) => <option key={item.id} value={item.id}>{item.label}{item.requiresCredits ? ' · 추가 크레딧 사용 가능성' : ''}</option>)}
-            </select>
-            <label htmlFor={`chat-effort-${provider}`}>추론 수준</label>
-            <select id={`chat-effort-${provider}`} value={settings.effort} disabled={disabled || !selected} onChange={(event) => setChatModels((current) => ({ ...current, [provider]: { ...current[provider], effort: event.target.value } }))}>
-              <option value="">CLI 기본 수준</option>{selected?.efforts.map((effort) => <option key={effort} value={effort}>{effort}{selected.defaultEffort === effort ? ' · 기본값' : ''}</option>)}
-            </select>
-            <span>{catalog ? `${catalog.source} · ${catalog.cliVersion}` : '모델 목록을 확인하고 있습니다.'}</span>
-            {catalog?.warning && <span className="chat-model-warning">{catalog.warning}</span>}
-          </div>;
-        })}</div>
-        <div className="field"><label htmlFor="project-chat-input">메시지</label><textarea id="project-chat-input" value={chatDraft} maxLength={20_000} rows={4} onChange={(event) => setChatDraft(event.target.value)} onPaste={pasteChatFiles} placeholder="메시지 입력 · 이미지 여러 개 드래그 또는 Ctrl+V로 스크린샷 붙여넣기" /></div>
-        <label className="chat-discussion-toggle"><input type="checkbox" checked={chatDiscussion} disabled={chatTarget !== 'both'} onChange={(event) => setChatDiscussion(event.target.checked)} />두 모델이 서로 반론하며 토론하기 · 기본 {project?.defaultDebateRounds ?? 2}회 왕복</label>
-        <div className="chat-attachments"><button className="button small" type="button" disabled={chatSending || chatFiles.length >= 5} onClick={() => void window.collab.chooseChatFiles().then((chosen) => setChatFiles((current) => [...current, ...chosen].slice(0, 5))).catch((error: unknown) => notify(errorText(error), true))}>＋ 이미지·파일 첨부</button>{chatFiles.map((file, index) => <button className="button ghost small" type="button" key={`${pendingFileName(file)}-${index}`} title={pendingFileName(file)} onClick={() => setChatFiles((current) => current.filter((_, position) => position !== index))}>📎 {pendingFileName(file)} ×</button>)}</div>
-        <div className="chat-compose-actions"><span className="subtle">첨부 파일은 프로젝트 Git에 저장됩니다. 업무는 Codex만 또는 Claude만을 선택해 각각 요청하세요. 완료되면 상대 모델이 검수합니다. 파일당 25MB, 총 50MB · 5개까지.</span><div className="session-actions">{chatSending && <button className="button danger" type="button" onClick={() => project && void window.collab.cancelProjectMessage(project.path)}>응답 중단</button>}<button className="button" type="button" disabled={!chatDraft.trim() || chatSending || chatTarget === 'both'} onClick={requestChatTask}>선택한 모델에 업무 요청</button><button className="button primary" type="submit" disabled={(!chatDraft.trim() && !chatFiles.length) || chatSending}>{chatSending ? '진행 중…' : '메시지 보내기'}</button></div></div>
-      </form>
     </div>
   );
 
@@ -967,7 +987,7 @@ export default function App() {
               <div className="activity-item" key={event.id}>
                 <span className="activity-dot" />
                 <span className="activity-copy"><strong>{eventLabel[event.type]}</strong> · {actorLabel(event.actor)}<br />{event.message.slice(0, 90)}{event.message.length > 90 ? '…' : ''}</span>
-                <span className="activity-time">{shortTime(event.timestamp)}</span>
+                <span className="activity-time">{shortTime(event.timestamp)}<br /><button className="button ghost small" type="button" onClick={() => { setExpandedChat(event); setDialog('chat-message'); }}>전체 보기</button></span>
               </div>
             )) : <Empty icon="◷" title="아직 기록이 없습니다" detail="업무를 만들고 논쟁을 시작하면 모든 과정이 여기에 쌓입니다." />}
           </div>
@@ -1034,13 +1054,13 @@ export default function App() {
           {debateScope === 'task' && selectedDebateTask && <><button className="button primary" disabled={!!busy || runningTaskIds.has(selectedDebateTask.id)} onClick={() => runTaskAction(selectedDebateTask, 'debate')}>논쟁 시작</button>{runningTaskIds.has(selectedDebateTask.id) && <button className="button danger" disabled={cancelBusy} onClick={() => cancelTask(selectedDebateTask)}>중단</button>}</>}
         </div>
       </div>
-      {debateScope === 'project' ? projectDebateEvents.length > 0 ? <div className="debate-flow">{projectDebateEvents.map((record) => <div className={'debate-card ' + (record.actor === 'system' || record.actor === 'user' ? '' : record.actor)} key={record.id}><div className="debate-header"><span className={'model-chip ' + record.actor}>{actorLabel(record.actor)}</span><span className="debate-role">{record.metadata?.discussionConclusion ? '최종 결론' : record.metadata?.discussionRound ? '상호 반론' : record.actor === 'user' ? '토론 요청' : '최초 답변'}</span>{record.metadata?.discussionRound && <span className="badge neutral">{record.metadata.discussionRound}회차</span>}{record.metadata?.transcript && <button className="button ghost small" onClick={() => openTranscript(record)}>CLI 원문</button>}<span className="activity-time" style={{ marginLeft: 'auto' }}>{shortTime(record.timestamp)}</span></div><div className="debate-content">{record.message}</div></div>)}</div> : <div className="panel"><Empty icon="◇" title="프로젝트 채팅 토론이 없습니다" detail="채팅에서 두 모델을 선택하고 토론을 요청하면 이곳에 왕복 기록이 표시됩니다." /></div> : selectedDebateTask ? <>
+      {debateScope === 'project' ? projectDebateEvents.length > 0 ? <div className="debate-flow">{projectDebateEvents.map((record) => <div className={'debate-card ' + (record.actor === 'system' || record.actor === 'user' ? '' : record.actor)} key={record.id}><div className="debate-header"><span className={'model-chip ' + record.actor}>{actorLabel(record.actor)}</span><span className="debate-role">{record.metadata?.discussionConclusion ? '최종 결론' : record.metadata?.discussionRound ? '상호 반론' : record.actor === 'user' ? '토론 요청' : '최초 답변'}</span>{record.metadata?.discussionRound && <span className="badge neutral">{record.metadata.discussionRound}회차</span>}{record.metadata?.transcript && <button className="button ghost small" onClick={() => openTranscript(record)}>CLI 원문</button>}<span className="activity-time" style={{ marginLeft: 'auto' }}>{shortTime(record.timestamp)}</span></div><div className={`debate-content${expandedRecordIds.includes(record.id) ? ' expanded' : ''}`}>{record.message}</div>{record.message.length > 280 && <button className="button ghost small" type="button" onClick={() => toggleRecord(record.id)}>{expandedRecordIds.includes(record.id) ? '접기' : '펼치기'}</button>}<button className="button ghost small" type="button" onClick={() => { setExpandedChat(record); setDialog('chat-message'); }}>전체 보기</button></div>)}</div> : <div className="panel"><Empty icon="◇" title="프로젝트 채팅 토론이 없습니다" detail="채팅에서 두 모델을 선택하고 토론을 요청하면 이곳에 왕복 기록이 표시됩니다." /></div> : selectedDebateTask ? <>
         <div className="note"><strong>{selectedDebateTask.title}</strong> · 기본 {selectedDebateTask.debateRounds}회 왕복. 양쪽 모델의 최종 입장과 미해결 쟁점이 기록됩니다.</div>
         <div className="debate-flow">
           {debateEvents.length ? debateEvents.map((event) => (
             <div className={'debate-card ' + (event.actor === 'system' || event.actor === 'user' ? '' : event.actor)} key={event.id}>
               <div className="debate-header"><span className={'model-chip ' + event.actor}>{actorLabel(event.actor)}</span><span className="debate-role">{eventLabel[event.type]}</span>{event.round !== undefined && <span className="badge neutral">{event.round}차</span>}{event.metadata?.transcript && <button className="button ghost small" onClick={() => openTranscript(event)}>CLI 원문</button>}<span className="activity-time" style={{ marginLeft: 'auto' }}>{shortTime(event.timestamp)}</span></div>
-              <div className="debate-content">{event.message}</div>
+              <div className={`debate-content${expandedRecordIds.includes(event.id) ? ' expanded' : ''}`}>{event.message}</div>{event.message.length > 280 && <button className="button ghost small" type="button" onClick={() => toggleRecord(event.id)}>{expandedRecordIds.includes(event.id) ? '접기' : '펼치기'}</button>}<button className="button ghost small" type="button" onClick={() => { setExpandedChat(event); setDialog('chat-message'); }}>전체 보기</button>
             </div>
           )) : <div className="panel"><Empty icon="◇" title="아직 진행된 논쟁이 없습니다" detail="논쟁을 시작하면 양쪽의 제안과 반론이 순서대로 표시됩니다." /></div>}
         </div>
@@ -1068,7 +1088,7 @@ export default function App() {
         {searchDisplay.length ? searchDisplay.map((event) => (
           <div className="search-result" key={event.id}>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}><span className="badge">{event.metadata?.source === 'imported' ? '가져온 대화' : eventLabel[event.type]}</span><strong style={{ fontSize: 12 }}>{actorLabel(event.actor)}</strong><span className="activity-time">{shortTime(event.timestamp)}</span>{event.taskId && <span className="subtle">업무: {tasks.find((task) => task.id === event.taskId)?.title ?? event.taskId}</span>}{event.round !== undefined && <span className="subtle">{event.round}차</span>}{event.metadata?.transcript && <button className="button ghost small" onClick={() => openTranscript(event)}>CLI 원문 열기</button>}{typeof event.metadata?.conversationId === 'string' && <button className="button ghost small" onClick={() => { const conversation = project?.importedConversations?.find((item) => item.id === event.metadata?.conversationId); if (conversation) viewImportedConversation(conversation); }}>대화 보기</button>}</div>
-            <p>{event.message}</p>
+            <p className={expandedRecordIds.includes(event.id) ? 'expanded' : ''}>{event.message}</p>{event.message.length > 280 && <button className="button ghost small" type="button" onClick={() => toggleRecord(event.id)}>{expandedRecordIds.includes(event.id) ? '접기' : '펼치기'}</button>}<button className="button ghost small" type="button" onClick={() => { setExpandedChat(event); setDialog('chat-message'); }}>전체 보기</button>
           </div>
         )) : <Empty icon="⌕" title={searchResults ? '검색 결과가 없습니다' : '저장된 이력이 없습니다'} detail={searchResults ? '다른 검색어로 다시 찾아보세요.' : '모델과 주고받은 내용이 실행 시마다 이곳에 기록됩니다.'} />}
       </div>
@@ -1099,7 +1119,7 @@ export default function App() {
         <p className="cli-help">로그인은 Codex·Claude CLI에서 진행합니다. 이 앱에는 계정 정보를 입력하지 않습니다.</p>
       </div>
     </aside>
-    <div className="main">
+    <div className={`main${project ? ` has-chat-dock${composerOpen ? '' : ' collapsed'}` : ''}`}>
       <header className="topbar"><div className="breadcrumbs">프로젝트 <span> / </span><strong>{project?.name ?? '시작하기'}</strong></div><div className="topbar-actions"><span className={'topbar-note ' + (busy || runningTaskIds.size ? 'busy' : '')}>{busy ? '◌ ' + busy + '…' : runningTaskIds.size ? `◌ 업무 ${runningTaskIds.size}개 실행 중` : '로컬 CLI · 로컬 기록 · Git'}</span><button className="button small" type="button" disabled={remoteBusy} onClick={openRemote}>{remoteBusy ? '모바일 연결 중…' : '모바일 연결'}</button><button className="button small" type="button" disabled={updateBusy} onClick={() => void checkForUpdate()}>{updateBusy ? '업데이트 확인 중…' : '앱 업데이트'}</button>{project && <button className="button small" onClick={() => void perform('새로고침 중', async () => refresh(project.path))} disabled={!!busy}>↻ 새로고침</button>}</div></header>
       <main className="content">
         {project ? <>
@@ -1108,6 +1128,7 @@ export default function App() {
           {tab === 'chat' ? renderChat() : tab === 'overview' ? renderOverview() : tab === 'tasks' ? renderTasks() : tab === 'debate' ? renderDebate() : renderHistory()}
         </> : <div className="welcome"><div className="panel welcome-card"><div className="brand-symbol"><img src={appIcon} alt="" /></div><div className="eyebrow">LOCAL FIRST WORKSPACE</div><h1>두 모델의 관점을 한곳에서</h1><p className="subtle">프로젝트 폴더를 지정하고 Codex와 Claude가 논쟁, 분업, 교차 검수를 진행하도록 설정하세요. 모든 대화와 산출물은 로컬에 보존됩니다.</p><button className="button primary" onClick={openProjectDialog}>첫 프로젝트 만들기</button></div></div>}
       </main>
+      {project && renderComposer()}
     </div>
     {busy && <div className="busy-overlay"><div className="busy-bar" /></div>}
     {toast && <div className={'toast ' + (toast.error ? 'error' : '')} role="status" onClick={() => setToast(null)}>{toast.message}</div>}
@@ -1136,7 +1157,7 @@ export default function App() {
       <div className="form-actions"><button className="button" type="button" onClick={() => setDialog(null)}>취소</button><button className="button primary" type="submit" disabled={!!busy}>저장</button></div>
     </form></div></div>}
     {dialog === 'session-history' && sessionHistory && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setDialog(null)}><div className="modal session-history-modal" role="dialog" aria-modal="true" aria-label="저장된 모델 대화"><div className="modal-header"><div><h2>{providerLabel(sessionHistory.session.provider)} 저장된 대화</h2><p className="subtle">{sessionHistory.session.sessionId}</p></div><button className="close" aria-label="닫기" onClick={() => setDialog(null)}>×</button></div><div className="modal-body"><p className="subtle session-history-note">프로젝트 Git에 저장된 기록입니다. CLI나 데스크톱 앱 연결 없이 볼 수 있습니다.</p>{sessionHistory.turns.length ? sessionHistory.turns.map(({ event, prompt }) => <article className="session-turn" key={event.id}><div className="session-turn-head"><span className="badge neutral">{eventLabel[event.type]}</span><span className="activity-time">{shortTime(event.timestamp)}</span>{event.metadata?.transcript && <button className="button ghost small" type="button" onClick={() => openTranscript(event)}>CLI 원문</button>}</div>{prompt && <details className="session-prompt"><summary>모델에 전달한 요청</summary><pre>{prompt}</pre></details>}<div className="session-response">{event.message}</div></article>) : <Empty icon="◎" title="저장된 응답이 없습니다" detail="해당 세션의 작업 이력이 기록되면 이곳에 표시됩니다." />}</div></div></div>}
-    {dialog === 'chat-message' && expandedChat && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setDialog(null)}><div className="modal chat-response-modal" role="dialog" aria-modal="true" aria-label="채팅 답변 전체 보기"><div className="modal-header"><div><h2>{actorLabel(expandedChat.actor)} 답변 전체 보기</h2><p className="subtle">{shortTime(expandedChat.timestamp)} · {expandedChat.message.length.toLocaleString()}자</p></div><button className="close" aria-label="닫기" onClick={() => setDialog(null)}>×</button></div><div className="modal-body"><div className="session-response">{expandedChat.message}</div></div></div></div>}
+    {dialog === 'chat-message' && expandedChat && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setDialog(null)}><div className="modal chat-response-modal" role="dialog" aria-modal="true" aria-label="기록 전체 보기"><div className="modal-header"><div><h2>{actorLabel(expandedChat.actor)} 기록 전체 보기</h2><p className="subtle">{shortTime(expandedChat.timestamp)} · {expandedChat.message.length.toLocaleString()}자</p></div><button className="close" aria-label="닫기" onClick={() => setDialog(null)}>×</button></div><div className="modal-body"><div className="session-response">{expandedChat.message}</div></div></div></div>}
     {dialog === 'transcript' && transcriptView && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setDialog(null)}><div className="modal transcript-modal" role="dialog" aria-modal="true" aria-label="CLI 원문 기록"><div className="modal-header"><div><h2>CLI 원문 기록</h2><p className="subtle">{transcriptView.path}</p></div><button className="close" aria-label="닫기" onClick={() => setDialog(null)}>×</button></div><div className="modal-body"><pre className="transcript-content">{transcriptView.content}</pre></div></div></div>}
   </div>;
 }
