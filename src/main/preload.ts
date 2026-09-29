@@ -16,6 +16,7 @@ const api: CollaborationAPI = {
   readImportedConversation: (projectPath, conversationId) => invoke('collab:readImportedConversation', projectPath, conversationId),
   readImportedConversationRaw: (projectPath, conversationId) => invoke('collab:readImportedConversationRaw', projectPath, conversationId),
   deleteProject: (projectPath, projectId, confirmation) => invoke('collab:deleteProject', projectPath, projectId, confirmation),
+  forgetMissingProject: (projectPath) => invoke('collab:forgetMissingProject', projectPath),
   openProject: (projectPath) => invoke('collab:openProject', projectPath),
   updateCharter: (projectPath, charter) => invoke('collab:updateCharter', projectPath, charter),
   updateProjectRounds: (projectPath, rounds) => invoke('collab:updateProjectRounds', projectPath, rounds),

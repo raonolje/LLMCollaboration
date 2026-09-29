@@ -368,6 +368,43 @@ describe('project deletion', () => {
     expect(trashed).toEqual([]);
     expect((await service.bootstrap()).projects).toHaveLength(1);
   }), 30_000);
+
+  it('removes only the registration when the project folder was already deleted', () => withTemporaryWorkspace(async (workspace) => {
+    const projectPath = path.join(workspace, 'project');
+    const trashed: string[] = [];
+    const service = createService({
+      registryPath: path.join(workspace, 'registry.json'), emit: () => undefined, autoStartSessions: false,
+      trashItem: async (target) => { trashed.push(target); },
+    });
+    const created = await service.createProject({ path: projectPath, name: 'Already gone', goal: 'Clean stale registration' });
+    await rm(projectPath, { recursive: true });
+    expect((await service.bootstrap()).missingProjectPaths).toEqual([projectPath]);
+    expect(await service.deleteProject(projectPath, created.project.id, created.project.name)).toBe('unregistered');
+    expect(trashed).toEqual([]);
+    expect((await service.bootstrap()).missingProjectPaths).toEqual([]);
+  }), 30_000);
+
+  it('offers a separate cleanup action for a missing folder after restart', () => withTemporaryWorkspace(async (workspace) => {
+    const projectPath = path.join(workspace, 'project');
+    const service = createService({ registryPath: path.join(workspace, 'registry.json'), emit: () => undefined, autoStartSessions: false });
+    await service.createProject({ path: projectPath, name: 'Missing later', goal: 'Clean registration' });
+    await expect(service.forgetMissingProject(projectPath)).rejects.toThrow('아직 있습니다');
+    await rm(projectPath, { recursive: true });
+    await service.forgetMissingProject(projectPath);
+    expect((await service.bootstrap()).missingProjectPaths).toEqual([]);
+  }), 30_000);
+
+  it('unregisters without touching an existing folder when its project record is gone', () => withTemporaryWorkspace(async (workspace) => {
+    const projectPath = path.join(workspace, 'project');
+    const service = createService({ registryPath: path.join(workspace, 'registry.json'), emit: () => undefined, autoStartSessions: false });
+    const created = await service.createProject({ path: projectPath, name: 'Metadata missing', goal: 'Keep unrelated files' });
+    const userFile = path.join(projectPath, 'keep.txt');
+    await writeFile(userFile, 'Keep this file', 'utf8');
+    await rm(path.join(projectPath, '.llm-collaboration', 'project.json'));
+    expect((await service.bootstrap()).missingProjectPaths).toEqual([projectPath]);
+    expect(await service.deleteProject(projectPath, created.project.id, created.project.name)).toBe('unregistered');
+    expect(await readFile(userFile, 'utf8')).toBe('Keep this file');
+  }), 30_000);
 });
 
 describe('conversation import', () => {
@@ -394,5 +431,30 @@ describe('conversation import', () => {
     expect((await service.search(projectPath, 'index still needs tests')).some((result) => result.metadata?.conversationId === imported!.id)).toBe(true);
     await expect(service.importConversation(projectPath, 'codex', source)).rejects.toThrow('이미 가져온');
     await expect(service.createTask(projectPath, taskInput({ sourceConversationIds: ['invalid'] }))).rejects.toThrow('저장된 대화만');
+  }), 30_000);
+
+  it('starts a new project with a prior chat in both model kickoff prompts', () => withTemporaryWorkspace(async (workspace) => {
+    const projectPath = path.join(workspace, 'existing-work');
+    const source = path.join(workspace, 'prior-claude-chat.jsonl');
+    const raw = [
+      { type: 'user', sessionId: 'prior-claude', message: { role: 'user', content: 'Build an offline screenplay workflow' } },
+      { type: 'assistant', sessionId: 'prior-claude', message: { role: 'assistant', content: [{ type: 'text', text: 'The scene editor is already in progress' }] } },
+    ].map(JSON.stringify).join('\n');
+    await mkdir(projectPath);
+    await writeFile(path.join(projectPath, 'existing-work.txt'), 'Keep existing work', 'utf8');
+    await writeFile(source, raw, 'utf8');
+    const prompts: string[] = [];
+    const service = createService({
+      registryPath: path.join(workspace, 'registry.json'), emit: () => undefined,
+      runModel: async (request) => { prompts.push(request.prompt); return recordMockTranscript(request, 'Understood'); },
+    });
+    const created = await service.createProject({
+      path: projectPath, name: 'Collaborative screenplay', goal: 'Finish the screenplay app',
+      initialConversation: { provider: 'claude', filePath: source },
+    });
+    expect(created.project.importedConversations?.[0].sessionId).toBe('prior-claude');
+    expect(prompts).toHaveLength(2);
+    expect(prompts.every((prompt) => prompt.includes('The scene editor is already in progress'))).toBe(true);
+    expect(await readFile(path.join(projectPath, 'existing-work.txt'), 'utf8')).toBe('Keep existing work');
   }), 30_000);
 });

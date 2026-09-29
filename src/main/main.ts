@@ -84,6 +84,7 @@ const registerHandlers = (): void => {
   ipcMain.handle('collab:readImportedConversation', (_event, projectPath, conversationId) => service.readImportedConversation(projectPath, conversationId));
   ipcMain.handle('collab:readImportedConversationRaw', (_event, projectPath, conversationId) => service.readImportedConversationRaw(projectPath, conversationId));
   ipcMain.handle('collab:deleteProject', (_event, projectPath, projectId, confirmation) => service.deleteProject(projectPath, projectId, confirmation));
+  ipcMain.handle('collab:forgetMissingProject', (_event, projectPath) => service.forgetMissingProject(projectPath));
   ipcMain.handle('collab:openProject', (_event, projectPath) => service.openProject(projectPath));
   ipcMain.handle('collab:updateCharter', (_event, projectPath, charter) => service.updateCharter(projectPath, charter));
   ipcMain.handle('collab:updateProjectRounds', (_event, projectPath, rounds) => service.updateProjectRounds(projectPath, rounds));

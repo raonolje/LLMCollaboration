@@ -93,6 +93,7 @@ export type ProjectInput = Readonly<{
   name: string;
   goal: string;
   defaultDebateRounds?: number;
+  initialConversation?: Readonly<{ provider: Provider; filePath: string }>;
 }>;
 
 export type DebateFollowUp = Readonly<{
@@ -137,6 +138,7 @@ export type CliStatus = Readonly<{
 
 export type Bootstrap = Readonly<{
   projects: Project[];
+  missingProjectPaths: string[];
   cli: CliStatus[];
 }>;
 
@@ -159,7 +161,8 @@ export type CollaborationAPI = Readonly<{
   readImportedConversation: (projectPath: string, conversationId: string) => Promise<ConversationTurn[]>;
   readImportedConversationRaw: (projectPath: string, conversationId: string) => Promise<string>;
   chooseConversationFile: () => Promise<string | null>;
-  deleteProject: (projectPath: string, projectId: string, confirmation: string) => Promise<void>;
+  deleteProject: (projectPath: string, projectId: string, confirmation: string) => Promise<'trashed' | 'unregistered'>;
+  forgetMissingProject: (projectPath: string) => Promise<void>;
   openProject: (projectPath: string) => Promise<ProjectSnapshot>;
   updateCharter: (projectPath: string, charter: string) => Promise<ProjectSnapshot>;
   updateProjectRounds: (projectPath: string, rounds: number) => Promise<ProjectSnapshot>;

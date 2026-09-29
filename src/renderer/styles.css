@@ -190,6 +190,8 @@ p { margin: 0; }
 .import-candidate.selected { border-color: #5268da; background: #f5f7ff; }
 .import-candidate strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .import-candidate small { grid-column: 2; color: #8290a5; }
+.missing-project { margin: 5px 8px 8px; padding: 10px; border: 1px solid #795565; border-radius: 9px; color: #d7b9c4; font-size: 11px; overflow-wrap: anywhere; }
+.missing-project button { display: block; margin-top: 8px; color: #fff; background: transparent; border: 1px solid #a47d8c; border-radius: 6px; padding: 5px 8px; cursor: pointer; }
 .task-sessions { margin-top: 12px; }
 .task-sessions summary { width: fit-content; cursor: pointer; color: #6075b6; font-size: 11px; font-weight: 700; }
 .task-sessions .session-grid { margin-top: 10px; }

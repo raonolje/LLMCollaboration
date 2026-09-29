@@ -71,6 +71,13 @@ const assertRealDirectory = async (directory: string): Promise<void> => {
     throw new Error(`실제 폴더만 삭제할 수 있습니다: ${directory}`);
   }
 };
+const directoryMissing = async (directory: string): Promise<boolean> =>
+  lstat(directory).then(() => false).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
+    throw error;
+  });
+const projectRecordMissing = (projectPath: string): Promise<boolean> =>
+  directoryMissing(projectFiles(projectPath).project);
 const assertSafeProjectDirectory = async (directory: string, registryPath: string): Promise<void> => {
   const home = os.homedir();
   const protectedLocations = [
@@ -367,6 +374,21 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
     return { ...input, sourceConversationIds: ids, sourceContext: contexts.join('\n\n---\n\n').slice(0, 42_000) };
   };
 
+  const attachConversation = async (projectPath: string, provider: Provider, filePath: string): Promise<ProjectSnapshot> => {
+    const current = await readProject(projectPath);
+    const imported = await importConversationFile(projectPath, provider, filePath);
+    if (current.importedConversations?.some((item) => item.id === imported.id)) {
+      throw new Error('이미 가져온 대화입니다.');
+    }
+    await replaceProject(projectPath, (project) => ({ ...project,
+      importedConversations: [...project.importedConversations ?? [], imported], updatedAt: now(),
+    }));
+    await event(projectPath, current.id, 'system', 'user',
+      `${provider === 'codex' ? 'Codex' : 'Claude'} 대화를 가져왔습니다: ${imported.title} (${imported.turnCount}개 발화)`,
+      undefined, undefined, { source: 'imported', conversationId: imported.id });
+    return snapshot(projectPath);
+  };
+
   const begin = (projectPath: string, taskId: string): AbortController => {
     const runKey = key(projectPath, taskId);
     if (active.has(runKey)) throw new Error('이 업무는 이미 실행 중입니다.');
@@ -415,6 +437,9 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
   const startProjectSessions = (projectPath: string): Promise<void> =>
     withLock(`project-sessions:${projectPath}`, async () => {
       const latest = await readProject(projectPath);
+      const importedContext = (await Promise.all((latest.importedConversations ?? []).slice(0, 3)
+        .map(async (conversation) => conversationContext(conversation, await readImportedTurns(projectPath, conversation.id)))))
+        .join('\n\n---\n\n').slice(0, 42_000);
       const hostId = await hostIdPromise;
       const missing = providers.filter((provider) => !latest.sessions?.some((session) =>
         session.hostId === hostId && session.provider === provider && session.purpose === 'project',
@@ -427,8 +452,9 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
               `프로젝트 ${latest.name}의 협업 대화를 시작합니다.`,
               `목표: ${latest.goal}`,
               `현재 기준: ${latest.charter || '추가 제약 없음'}`,
+              importedContext && `기존에 한 모델과 진행한 대화의 맥락:\n${importedContext}`,
               '이 프로젝트의 후속 요청에서는 매번 전달되는 업무 카드와 완료 기준을 우선해 주세요. 지금은 폴더를 수정하지 말고 목표와 협업 방식의 이해를 짧게 확인하세요.',
-            ].join('\n\n'),
+            ].filter(Boolean).join('\n\n'),
             phase: 'project-kickoff', readOnly: true, signal: new AbortController().signal,
           }, 'project');
           await event(projectPath, latest.id, 'system', provider, result.text, undefined, undefined, {
@@ -497,7 +523,9 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
       const projects = projectResults
         .filter((result): result is PromiseFulfilledResult<Project> => result.status === 'fulfilled')
         .map((result) => result.value);
-      return { projects, cli: cliResults as CliStatus[] };
+      const missing = await Promise.all(projectResults.map(async (result, index) =>
+        result.status === 'rejected' && await projectRecordMissing(projectPaths[index]) ? projectPaths[index] : null));
+      return { projects, missingProjectPaths: missing.filter((item): item is string => item !== null), cli: cliResults as CliStatus[] };
     },
 
     refreshCliStatus: cliStatuses,
@@ -532,13 +560,19 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
       });
       if (existing) {
         await registerProject(projectPath);
+        if (input.initialConversation) await attachConversation(projectPath,
+          input.initialConversation.provider, input.initialConversation.filePath);
         if (autoStartSessions) await startProjectSessions(projectPath);
         return snapshot(projectPath);
       }
       const timestamp = now();
+      const imported = input.initialConversation
+        ? await importConversationFile(projectPath, input.initialConversation.provider, input.initialConversation.filePath)
+        : undefined;
       const project: Project = {
         id: randomUUID(), name: input.name.trim(), path: projectPath, goal: input.goal.trim(), charter: '',
         defaultDebateRounds: roundCount(input.defaultDebateRounds), createdAt: timestamp, updatedAt: timestamp,
+        ...(imported ? { importedConversations: [imported] } : {}),
       };
       await stateLock(projectPath, async () => {
         await writeJson(files.project, project);
@@ -548,24 +582,15 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
       await checkpoint(projectPath, `Create project ${project.name}`);
       await registerProject(projectPath);
       await event(projectPath, project.id, 'system', 'system', `프로젝트를 생성했습니다. 목표: ${project.goal}`);
+      if (imported) await event(projectPath, project.id, 'system', 'user',
+        `기존 ${imported.provider === 'codex' ? 'Codex' : 'Claude'} 대화를 프로젝트 시작 맥락으로 가져왔습니다: ${imported.title}`,
+        undefined, undefined, { source: 'imported', conversationId: imported.id });
       if (autoStartSessions) await startProjectSessions(projectPath);
       return snapshot(projectPath);
     },
 
     importConversation: async (projectPath: string, provider: Provider, filePath: string): Promise<ProjectSnapshot> => {
-      const resolved = path.resolve(projectPath);
-      const current = await readProject(resolved);
-      const imported = await importConversationFile(resolved, provider, filePath);
-      if (current.importedConversations?.some((item) => item.id === imported.id)) {
-        throw new Error('이미 가져온 대화입니다.');
-      }
-      await replaceProject(resolved, (project) => ({ ...project,
-        importedConversations: [...project.importedConversations ?? [], imported], updatedAt: now(),
-      }));
-      await event(resolved, current.id, 'system', 'user',
-        `${provider === 'codex' ? 'Codex' : 'Claude'} 대화를 가져왔습니다: ${imported.title} (${imported.turnCount}개 발화)`,
-        undefined, undefined, { source: 'imported', conversationId: imported.id });
-      return snapshot(resolved);
+      return attachConversation(path.resolve(projectPath), provider, filePath);
     },
 
     readImportedConversation: async (projectPath: string, conversationId: string) => {
@@ -586,9 +611,9 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
       return readImportedRaw(resolved, conversationId);
     },
 
-    deleteProject: async (projectPath: string, projectId: string, confirmation: string): Promise<void> => {
+    deleteProject: async (projectPath: string, projectId: string, confirmation: string): Promise<'trashed' | 'unregistered'> => {
       const resolved = path.resolve(projectPath);
-      await withLock(`delete:${resolved}`, async () => {
+      return withLock(`delete:${resolved}`, async () => {
         const registered = await readRegisteredPaths();
         if (!registered.some((candidate) => samePath(candidate, resolved))) throw new Error('등록된 프로젝트가 아닙니다.');
         if (registered.some((candidate) => !samePath(candidate, resolved) && containsPath(resolved, candidate))) {
@@ -597,35 +622,55 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
         if (Array.from(active.keys()).some((runKey) => runKey.startsWith(`${resolved}::`))) {
           throw new Error('진행 중인 업무가 있습니다. 업무가 끝난 뒤 프로젝트를 삭제하세요.');
         }
-        const project = await readProject(resolved);
-        if (project.id !== projectId || !samePath(project.path, resolved) || confirmation !== project.name) {
-          throw new Error('프로젝트 이름 또는 식별자가 일치하지 않습니다.');
+        if (!projectId.trim() || !confirmation.trim()) throw new Error('프로젝트 삭제 확인 정보가 없습니다.');
+        if (await projectRecordMissing(resolved)) { await unregisterProject(resolved); return 'unregistered' as const; }
+        const trashExisting = async (target: string): Promise<void> => {
+          if (await directoryMissing(target)) return;
+          try { await trashItem(target); }
+          catch (error) { if (!await directoryMissing(target)) throw error; }
+        };
+        try {
+          const project = await readProject(resolved);
+          if (project.id !== projectId || !samePath(project.path, resolved) || confirmation !== project.name) {
+            throw new Error('프로젝트 이름 또는 식별자가 일치하지 않습니다.');
+          }
+          await assertSafeProjectDirectory(resolved, registryPath);
+          if (!samePath(await git(resolved, ['rev-parse', '--show-toplevel']), resolved)) {
+            throw new Error('프로젝트 폴더가 Git 저장소 루트가 아닙니다.');
+          }
+          const worktreeRoot = projectWorktreeDirectory(resolved, project.id);
+          const worktreeParent = path.dirname(worktreeRoot);
+          const worktreeExists = !await directoryMissing(worktreeRoot);
+          if (worktreeExists) {
+            await assertRealDirectory(worktreeParent);
+            await assertRealDirectory(worktreeRoot);
+          }
+          const worktrees = (await git(resolved, ['worktree', 'list', '--porcelain']))
+            .split(/\r?\n/u).filter((line) => line.startsWith('worktree ')).map((line) => line.slice('worktree '.length));
+          const external = worktrees.filter((directory) => !samePath(directory, resolved) && !containsPath(worktreeRoot, directory));
+          if (external.length) throw new Error(`앱 관리 범위 밖의 Git worktree가 있습니다: ${external.join(', ')}`);
+          if (worktreeExists) {
+            await trashExisting(worktreeRoot);
+            if (!await directoryMissing(worktreeParent) && (await readdir(worktreeParent)).length === 0) await trashExisting(worktreeParent);
+          }
+          await trashExisting(resolved);
+          await unregisterProject(resolved);
+          return 'trashed' as const;
+        } catch (error) {
+          if (!await projectRecordMissing(resolved)) throw error;
+          await unregisterProject(resolved);
+          return 'unregistered' as const;
         }
-        await assertSafeProjectDirectory(resolved, registryPath);
-        if (!samePath(await git(resolved, ['rev-parse', '--show-toplevel']), resolved)) {
-          throw new Error('프로젝트 폴더가 Git 저장소 루트가 아닙니다.');
-        }
-        const worktreeRoot = projectWorktreeDirectory(resolved, project.id);
-        const worktreeParent = path.dirname(worktreeRoot);
-        const worktreeExists = await lstat(worktreeRoot).then(() => true).catch((error: unknown) => {
-          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
-          throw error;
-        });
-        if (worktreeExists) {
-          await assertRealDirectory(worktreeParent);
-          await assertRealDirectory(worktreeRoot);
-        }
-        const worktrees = (await git(resolved, ['worktree', 'list', '--porcelain']))
-          .split(/\r?\n/u).filter((line) => line.startsWith('worktree ')).map((line) => line.slice('worktree '.length));
-        const external = worktrees.filter((directory) => !samePath(directory, resolved) && !containsPath(worktreeRoot, directory));
-        if (external.length) throw new Error(`앱 관리 범위 밖의 Git worktree가 있습니다: ${external.join(', ')}`);
-        if (worktreeExists) {
-          await trashItem(worktreeRoot);
-          if ((await readdir(worktreeParent)).length === 0) await trashItem(worktreeParent);
-        }
-        await trashItem(resolved);
-        await unregisterProject(resolved);
       });
+    },
+
+    forgetMissingProject: async (projectPath: string): Promise<void> => {
+      const resolved = path.resolve(projectPath);
+      if (!(await readRegisteredPaths()).some((candidate) => samePath(candidate, resolved))) {
+        throw new Error('등록된 프로젝트가 아닙니다.');
+      }
+      if (!await projectRecordMissing(resolved)) throw new Error('프로젝트 기록이 아직 있습니다. 프로젝트 삭제를 사용하세요.');
+      await unregisterProject(resolved);
     },
 
     openProject: async (projectPath: string): Promise<ProjectSnapshot> => {
