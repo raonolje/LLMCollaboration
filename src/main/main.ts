@@ -66,12 +66,13 @@ const createWindow = (): BrowserWindow => {
 };
 
 const registerHandlers = (): void => {
+  let remote: ReturnType<typeof createRemote> | undefined;
   const service = createService({
     registryPath: path.join(app.getPath('userData'), 'projects.json'),
-    emit: (event: CollaborationEvent) => mainWindow?.webContents.send('collab:event', event),
+    emit: (event: CollaborationEvent) => { mainWindow?.webContents.send('collab:event', event); remote?.publishEvent(event); },
     trashItem: trashItemWithFallback,
   });
-  const remote = createRemote(service, app.getPath('userData'), { webRoot: path.join(app.getAppPath(), 'mobile', 'web-dist') });
+  remote = createRemote(service, app.getPath('userData'), { webRoot: path.join(app.getAppPath(), 'mobile', 'web-dist') });
   closeRemote = remote.close;
   void remote.initialize();
 

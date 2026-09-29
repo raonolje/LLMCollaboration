@@ -9,6 +9,7 @@ export type Task = { id: string; title: string; description: string; status: str
 export type Snapshot = { project: Project; tasks: Task[]; events: Event[] };
 export type Catalog = { provider: Provider; models: { id: string; label: string; efforts: string[]; defaultEffort?: string; requiresCredits?: boolean }[] };
 export type Connection = { url: string; token: string };
+export type Operation = { id: string; kind: string; projectId: string; state: 'running' | 'done' | 'error'; target?: Target; taskId?: string; error?: string };
 const storageKey = 'llm-collaboration-connection';
 
 export const loadConnection = async (): Promise<Connection | null> => {
@@ -45,4 +46,20 @@ export const request = async <T>(connection: Connection, route: string, body?: u
     if (!response.ok) throw new Error(result.error ?? `연결 오류 (${response.status})`);
     return result;
   } finally { clearTimeout(timeout); }
+};
+
+export const watchEvents = async (connection: Connection, onUpdate: () => void, signal: AbortSignal, onReady: () => void): Promise<void> => {
+  const response = await fetch(`${connection.url}/v1/events`, { headers: { Authorization: `Bearer ${connection.token}` }, signal });
+  if (!response.ok || !response.body) throw new Error('실시간 연결을 열 수 없습니다.');
+  onReady();
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const consume = async (pending: string): Promise<void> => {
+    const { done, value } = await reader.read();
+    if (done) return;
+    const blocks = `${pending}${decoder.decode(value, { stream: true })}`.split(/\r?\n\r?\n/u);
+    blocks.slice(0, -1).filter((block) => block.startsWith('data: ')).forEach(onUpdate);
+    await consume(blocks.at(-1) ?? '');
+  };
+  await consume('');
 };

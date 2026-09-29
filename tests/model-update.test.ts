@@ -20,8 +20,10 @@ describe('current model selection', () => {
   });
 
   it('reads Claude aliases from the current documentation table without pinning model versions', () => {
-    const aliases = parseClaudeAliases('### Model aliases\n| Model alias | Behavior |\n| - | - |\n| **`sonnet`** | Latest Sonnet |\n| **`fable`** | Credit model |\n### Work with models');
-    expect(aliases.map((item) => item.id)).toEqual(['sonnet', 'fable']);
+    const aliases = parseClaudeAliases('### Model aliases\n| Model alias | Behavior |\n| - | - |\n| **`sonnet`** | Latest Sonnet |\n| **`opus`** | Latest Opus |\n| **`fable`** | Credit model |\n| Anthropic API | Opus 5.5 | Sonnet 5.5 |\nUnless configured, the `fable` alias resolves to Fable 5.1\n### Work with models');
+    expect(aliases.map((item) => item.id)).toEqual(['sonnet', 'opus', 'fable']);
+    expect(aliases.find((item) => item.id === 'opus')?.label).toContain('Opus 5.5');
+    expect(aliases.find((item) => item.id === 'fable')?.label).toContain('Fable 5.1');
     expect(aliases.find((item) => item.id === 'fable')?.requiresCredits).toBe(true);
   });
 });

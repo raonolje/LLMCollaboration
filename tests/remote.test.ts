@@ -34,6 +34,11 @@ describe('remote companion', () => {
       const unauthorized = await fetch(`${status.url}/v1/projects`);
       expect(unauthorized.status).toBe(401);
       const headers = { Authorization: `Bearer ${status.token}` };
+      const streamAbort = new AbortController();
+      const stream = await fetch(`${status.url}/v1/events`, { headers, signal: streamAbort.signal });
+      expect(stream.status).toBe(200);
+      const reader = stream.body?.getReader();
+      expect(new TextDecoder().decode((await reader?.read())?.value)).toContain('connected');
       const projects = await fetch(`${status.url}/v1/projects`, { headers });
       expect((await projects.json() as { projects: { id: string }[] }).projects[0].id).toBe('project-1');
       const unknown = await fetch(`${status.url}/v1/projects/other`, { headers });
@@ -43,6 +48,8 @@ describe('remote companion', () => {
         body: JSON.stringify({ message: 'Check this', target: 'codex', models: {} }),
       });
       expect(sent.status).toBe(202);
+      expect(new TextDecoder().decode((await reader?.read())?.value)).toContain('"kind":"operation"');
+      streamAbort.abort();
       await vi.waitFor(() => expect(sendProjectMessage).toHaveBeenCalledWith(directory, 'Check this', 'codex', {}));
       const rotated = await remote.rotateToken();
       expect(rotated.token).not.toBe(status.token);

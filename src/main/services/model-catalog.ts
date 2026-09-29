@@ -85,9 +85,23 @@ const codexCatalog = async (executable: string, cliVersion: string): Promise<Mod
 
 export const parseClaudeAliases = (markdown: string): ModelOption[] => {
   const section = markdown.split('### Model aliases')[1]?.split('\n### ')[0] ?? '';
+  const apiVersions = markdown.match(/^\| Anthropic API \| ([^|]+) \| ([^|]+) \|/mu);
+  const opusName = apiVersions?.[1].trim() ?? 'Opus';
+  const sonnetName = apiVersions?.[2].trim() ?? 'Sonnet';
+  const fableName = markdown.match(/`fable` alias resolves to (Fable [\d.]+)/u)?.[1] ?? 'Fable';
+  const names: Record<string, string> = {
+    best: `Best · Fable 가능 시 사용, 아니면 ${opusName}`,
+    fable: `Claude ${fableName} (앱 경로는 Fable 5) · fable 별칭`,
+    opus: `Claude ${opusName} (Anthropic API 기준) · opus 별칭`,
+    sonnet: `Claude ${sonnetName} (Anthropic API 기준) · sonnet 별칭`,
+    haiku: 'Claude Haiku · haiku 별칭',
+    'sonnet[1m]': `Claude ${sonnetName} · sonnet[1m]`,
+    'opus[1m]': `Claude ${opusName} · opus[1m]`,
+  };
+  const label = (id: string): string => names[id] ?? id;
   return [...section.matchAll(/^\| \*\*`([^`]+)`\*\* \| ([^|]+) \|/gmu)]
     .map((match): ModelOption => ({
-      id: match[1], label: match[1], description: match[2].replace(/\[[^\]]+\]\([^)]*\)/gu, '').replaceAll('*', '').trim(),
+      id: match[1], label: label(match[1]), description: match[2].replace(/\[[^\]]+\]\([^)]*\)/gu, '').replaceAll('*', '').trim(),
       efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
       requiresCredits: /^(?:best|fable)/u.test(match[1]),
     }))
@@ -99,9 +113,7 @@ const claudeCatalog = async (cliVersion: string): Promise<ModelCatalog> => {
   const result = await fetch(url, { signal: AbortSignal.timeout(8_000) })
     .then(async (response) => response.ok ? parseClaudeAliases(await response.text()) : [])
     .catch(() => []);
-  const fallback = ['sonnet', 'opus', 'haiku'].map((id): ModelOption => ({
-    id, label: id, description: 'Claude Code 모델 별칭', efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
-  }));
+  const fallback = parseClaudeAliases('### Model aliases\n| Model alias | Behavior |\n| - | - |\n| **`sonnet`** | Latest Sonnet |\n| **`opus`** | Latest Opus |\n| **`haiku`** | Latest Haiku |');
   const settingsRoot = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
   const settings = await readFile(path.join(settingsRoot, 'settings.json'), 'utf8')
     .then((raw) => JSON.parse(raw) as { availableModels?: string[] }).catch(() => ({} as { availableModels?: string[] }));
@@ -113,7 +125,7 @@ const claudeCatalog = async (cliVersion: string): Promise<ModelCatalog> => {
   return {
     provider: 'claude', source: result.length ? 'Claude Code 공식 모델 별칭' : 'Claude Code 기본 별칭',
     cliVersion, refreshedAt: new Date().toISOString(), models: options,
-    warning: 'Claude Code CLI는 계정별 모델 목록 조회 명령을 제공하지 않습니다. 별칭은 최신 모델을 가리킵니다. 계정 사용 가능 여부는 실행 시 확인되며, 지원하지 않는 추론 수준은 Claude가 자동으로 낮출 수 있습니다.',
+    warning: 'Claude Code CLI는 계정별 모델·크레딧 목록을 제공하지 않습니다. 표시된 버전은 공식 문서의 Anthropic API 기준이며 계정·제공자·설정에 따라 별칭이 다른 버전으로 연결될 수 있습니다. 실제 사용 가능 여부와 추가 크레딧 사용은 Claude Code가 실행 시 결정합니다.',
   };
 };
 

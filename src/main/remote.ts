@@ -3,11 +3,11 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { networkInterfaces } from 'node:os';
 import path from 'node:path';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import type { ChatModelSettings, DebateFollowUp, Provider, RemoteStatus, TaskInput } from '../shared/types';
+import type { ChatModelSettings, CollaborationEvent, DebateFollowUp, Provider, RemoteStatus, TaskInput } from '../shared/types';
 import type { Service } from './services';
 
 type Settings = { enabled: boolean; token: string };
-type Operation = { id: string; kind: string; projectId: string; state: 'running' | 'done' | 'error'; error?: string };
+type Operation = { id: string; kind: string; projectId: string; state: 'running' | 'done' | 'error'; target?: Provider | 'both'; taskId?: string; error?: string };
 const port = 48721;
 const token = (): string => randomBytes(32).toString('hex');
 const json = (response: ServerResponse, status: number, value: unknown): void => {
@@ -56,6 +56,8 @@ export const createRemote = (service: Service, userData: string, options: { addr
   let settings: Settings | null = null;
   let lastError: string | undefined;
   const operations = new Map<string, Operation>();
+  const listeners = new Set<ServerResponse>();
+  const publish = (value: unknown): void => { listeners.forEach((listener) => listener.write(`data: ${JSON.stringify(value)}\n\n`)); };
   const readSettings = async (): Promise<Settings> => {
     if (settings) return settings;
     const existing = await readFile(settingsFile, 'utf8').then((raw) => JSON.parse(raw) as Settings)
@@ -76,12 +78,13 @@ export const createRemote = (service: Service, userData: string, options: { addr
     if (!project) throw new Error('프로젝트를 찾을 수 없습니다.');
     return project.path;
   };
-  const launch = (kind: string, projectId: string, action: () => Promise<unknown>): Operation => {
+  const launch = (kind: string, projectId: string, action: () => Promise<unknown>, details: Pick<Operation, 'target' | 'taskId'> = {}): Operation => {
     const id = randomBytes(12).toString('hex');
-    const operation: Operation = { id, kind, projectId, state: 'running' };
+    const operation: Operation = { id, kind, projectId, state: 'running', ...details };
     operations.set(id, operation);
-    void action().then(() => { operations.set(id, { ...operation, state: 'done' }); })
-      .catch((error: unknown) => { operations.set(id, { ...operation, state: 'error', error: message(error) }); });
+    publish({ kind: 'operation', operation });
+    void action().then(() => { const done = { ...operation, state: 'done' as const }; operations.set(id, done); publish({ kind: 'operation', operation: done }); })
+      .catch((error: unknown) => { const failed = { ...operation, state: 'error' as const, error: message(error) }; operations.set(id, failed); publish({ kind: 'operation', operation: failed }); });
     return operation;
   };
   const handle = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
@@ -112,6 +115,14 @@ export const createRemote = (service: Service, userData: string, options: { addr
       }
       if (!authorized(request, (await readSettings()).token)) { json(response, 401, { error: '연결 코드가 올바르지 않습니다.' }); return; }
       const segments = url.pathname.split('/').filter(Boolean);
+      if (request.method === 'GET' && url.pathname === '/v1/events') {
+        response.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Content-Type-Options': 'nosniff' });
+        response.write(': connected\n\n');
+        listeners.add(response);
+        const heartbeat = setInterval(() => response.write(': heartbeat\n\n'), 20_000);
+        request.on('close', () => { clearInterval(heartbeat); listeners.delete(response); });
+        return;
+      }
       if (request.method === 'GET' && url.pathname === '/v1/health') { json(response, 200, { ok: true, version: 1 }); return; }
       if (request.method === 'GET' && url.pathname === '/v1/projects') {
         json(response, 200, { projects: await service.listProjects() }); return;
@@ -138,7 +149,7 @@ export const createRemote = (service: Service, userData: string, options: { addr
         const selected = Object.fromEntries((['codex', 'claude'] as Provider[])
           .filter((provider) => models[provider])
           .map((provider) => [provider, models[provider]])) as Partial<Record<Provider, ChatModelSettings>>;
-        json(response, 202, launch('chat', id, () => service.sendProjectMessage(directory, chatMessage, chatTarget, selected))); return;
+        json(response, 202, launch('chat', id, () => service.sendProjectMessage(directory, chatMessage, chatTarget, selected), { target: chatTarget })); return;
       }
       if (action === 'cancel-chat') { await service.cancelProjectMessage(directory); json(response, 200, { ok: true }); return; }
       if (action === 'tasks' && segments.length === 4) {
@@ -148,12 +159,12 @@ export const createRemote = (service: Service, userData: string, options: { addr
       if (action === 'tasks' && segments[4]) {
         const taskId = segments[4];
         const command = segments[5];
-        if (command === 'debate') { json(response, 202, launch('debate', id, () => service.runDebate(directory, taskId))); return; }
+        if (command === 'debate') { json(response, 202, launch('debate', id, () => service.runDebate(directory, taskId), { taskId })); return; }
         if (command === 'continue') {
           const followUp: DebateFollowUp = { message: text(body.message), target: target(body.target), additionalRounds: Number(body.additionalRounds) };
-          json(response, 202, launch('continue', id, () => service.continueDebate(directory, taskId, followUp))); return;
+          json(response, 202, launch('continue', id, () => service.continueDebate(directory, taskId, followUp), { taskId, target: followUp.target })); return;
         }
-        if (command === 'execute') { json(response, 202, launch('execute', id, () => service.executeTask(directory, taskId))); return; }
+        if (command === 'execute') { json(response, 202, launch('execute', id, () => service.executeTask(directory, taskId), { taskId })); return; }
         if (command === 'cancel') { await service.cancelRun(directory, taskId); json(response, 200, { ok: true }); return; }
       }
       json(response, 404, { error: '요청을 찾을 수 없습니다.' });
@@ -164,6 +175,8 @@ export const createRemote = (service: Service, userData: string, options: { addr
     const current = server;
     server = null;
     boundAddress = undefined;
+    listeners.forEach((listener) => listener.end());
+    listeners.clear();
     await new Promise<void>((resolve) => current.close(() => resolve()));
   };
   const start = async (): Promise<void> => {
@@ -201,8 +214,11 @@ export const createRemote = (service: Service, userData: string, options: { addr
     rotateToken: async (): Promise<RemoteStatus> => {
       const current = await readSettings();
       await save({ ...current, token: token() });
+      listeners.forEach((listener) => listener.end());
+      listeners.clear();
       return status();
     },
+    publishEvent: (event: CollaborationEvent): void => publish({ kind: 'event', event }),
     close: stop,
   };
 };

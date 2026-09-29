@@ -724,7 +724,7 @@ export default function App() {
           const disabled = chatTarget !== 'both' && chatTarget !== provider;
           return <div className="field" key={provider}><label htmlFor={`chat-model-${provider}`}>{providerLabel(provider)} 모델</label>
             <select id={`chat-model-${provider}`} value={settings.model} disabled={disabled || modelBusy} onChange={(event) => setChatModels((current) => ({ ...current, [provider]: { model: event.target.value, effort: '' } }))}>
-              <option value="">CLI 기본 모델</option>{catalog?.models.map((item) => <option key={item.id} value={item.id} disabled={item.requiresCredits}>{item.label}{item.requiresCredits ? ' (추가 크레딧 가능성으로 비활성화)' : ''}</option>)}
+              <option value="">CLI 기본 모델</option>{catalog?.models.map((item) => <option key={item.id} value={item.id}>{item.label}{item.requiresCredits ? ' · 추가 크레딧 사용 가능성' : ''}</option>)}
             </select>
             <label htmlFor={`chat-effort-${provider}`}>추론 수준</label>
             <select id={`chat-effort-${provider}`} value={settings.effort} disabled={disabled || !selected} onChange={(event) => setChatModels((current) => ({ ...current, [provider]: { ...current[provider], effort: event.target.value } }))}>
