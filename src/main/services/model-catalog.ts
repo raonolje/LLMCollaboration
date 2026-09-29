@@ -52,7 +52,7 @@ const codexModels = async (executable: string): Promise<CodexModel[]> => new Pro
     });
   });
   write({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {
-    clientInfo: { name: 'llm-collaboration', title: 'LLM Collaboration', version: '0.2.1' }, capabilities: null,
+    clientInfo: { name: 'llm-collaboration', title: 'LLM Collaboration', version: '0.2.2' }, capabilities: null,
   } });
 });
 
@@ -71,7 +71,7 @@ const codexCache = async (): Promise<CodexModel[]> => {
 
 const codexCatalog = async (executable: string, cliVersion: string): Promise<ModelCatalog> => {
   const live = await codexModels(executable).then((models) => ({ models, source: 'Codex CLI', warning: undefined }))
-    .catch(async (error: unknown) => ({ models: await codexCache(), source: 'Codex 로컬 캐시',
+    .catch(async (error: unknown) => ({ models: await codexCache().catch(() => []), source: 'Codex 로컬 캐시',
       warning: `실시간 조회 실패: ${error instanceof Error ? error.message : String(error)}` }));
   return {
     provider: 'codex', source: live.source, cliVersion, refreshedAt: new Date().toISOString(), warning: live.warning,
@@ -106,11 +106,14 @@ const claudeCatalog = async (cliVersion: string): Promise<ModelCatalog> => {
   const settings = await readFile(path.join(settingsRoot, 'settings.json'), 'utf8')
     .then((raw) => JSON.parse(raw) as { availableModels?: string[] }).catch(() => ({} as { availableModels?: string[] }));
   const available = Array.isArray(settings.availableModels) ? new Set(settings.availableModels) : null;
-  const options = (result.length ? result : fallback).filter((item) => !available || available.has(item.id));
+  const options = available
+    ? [...available].map((id) => (result.length ? result : fallback).find((item) => item.id === id)
+      ?? { id, label: id, description: 'Claude Code 로컬 허용 모델', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], requiresCredits: /fable|best/iu.test(id) })
+    : result.length ? result : fallback;
   return {
     provider: 'claude', source: result.length ? 'Claude Code 공식 모델 별칭' : 'Claude Code 기본 별칭',
     cliVersion, refreshedAt: new Date().toISOString(), models: options,
-    warning: 'Claude Code CLI는 계정별 모델 목록 조회 명령을 제공하지 않습니다. 별칭은 최신 모델을 가리키며, 계정 사용 가능 여부와 지원 추론 수준은 실행 시 확인됩니다.',
+    warning: 'Claude Code CLI는 계정별 모델 목록 조회 명령을 제공하지 않습니다. 별칭은 최신 모델을 가리킵니다. 계정 사용 가능 여부는 실행 시 확인되며, 지원하지 않는 추론 수준은 Claude가 자동으로 낮출 수 있습니다.',
   };
 };
 

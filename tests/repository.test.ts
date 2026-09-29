@@ -131,7 +131,7 @@ describe('local project persistence', () => {
     const nested = path.join(root, 'nested');
     await mkdir(nested);
     await expect(ensureProjectRepository(nested)).rejects.toThrow('저장소 루트를 선택하세요');
-    expect(path.resolve(await git(nested, ['rev-parse', '--show-toplevel']))).toBe(path.resolve(root));
+    expect(await realpath(await git(nested, ['rev-parse', '--show-toplevel']))).toBe(await realpath(root));
   }));
 });
 

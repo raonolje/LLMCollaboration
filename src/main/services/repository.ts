@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { mkdir, readFile, rename, stat, writeFile, appendFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -68,8 +69,12 @@ export const git = async (cwd: string, args: string[]): Promise<string> => {
 };
 
 const samePath = (a: string, b: string): boolean => {
-  const left = path.resolve(a);
-  const right = path.resolve(b);
+  const canonical = (value: string): string => {
+    try { return realpathSync.native(value); }
+    catch { return path.resolve(value); }
+  };
+  const left = canonical(a);
+  const right = canonical(b);
   return process.platform === 'win32'
     ? left.toLocaleLowerCase() === right.toLocaleLowerCase()
     : left === right;

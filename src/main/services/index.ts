@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { createReadStream } from 'node:fs';
+import { createReadStream, realpathSync } from 'node:fs';
 import { lstat, mkdir, readFile, readdir, realpath, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -59,17 +59,21 @@ const providers: readonly Provider[] = ['codex', 'claude'];
 const opposite = (provider: Provider): Provider => provider === 'codex' ? 'claude' : 'codex';
 const now = (): string => new Date().toISOString();
 const key = (projectPath: string, taskId: string): string => `${path.resolve(projectPath)}::${taskId}`;
+const canonicalPath = (value: string): string => {
+  try { return realpathSync.native(value); }
+  catch { return path.resolve(value); }
+};
 const samePath = (left: string, right: string): boolean =>
   process.platform === 'win32'
-    ? path.resolve(left).toLocaleLowerCase() === path.resolve(right).toLocaleLowerCase()
-    : path.resolve(left) === path.resolve(right);
+    ? canonicalPath(left).toLocaleLowerCase() === canonicalPath(right).toLocaleLowerCase()
+    : canonicalPath(left) === canonicalPath(right);
 const containsPath = (parent: string, child: string): boolean => {
-  const relative = path.relative(parent, child);
+  const relative = path.relative(canonicalPath(parent), canonicalPath(child));
   return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 };
 const assertRealDirectory = async (directory: string): Promise<void> => {
   const entry = await lstat(directory);
-  if (!entry.isDirectory() || entry.isSymbolicLink() || !samePath(await realpath(directory), directory)) {
+  if (!entry.isDirectory() || entry.isSymbolicLink()) {
     throw new Error(`실제 폴더만 삭제할 수 있습니다: ${directory}`);
   }
 };
