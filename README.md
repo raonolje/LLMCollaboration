@@ -60,7 +60,7 @@ npm run package:mac  # macOS: DMG와 ZIP
 
 ## iPhone 원격 연결
 
-Windows 또는 macOS PC와 iPhone에 [Tailscale](https://tailscale.com/download)을 설치하고 같은 tailnet에 로그인합니다. 데스크톱 앱 상단의 **모바일 연결**을 누르면 Tailscale 인터페이스에 모바일 화면과 작업 서버를 자동으로 열고 QR 코드를 표시합니다. 아이폰 카메라로 QR을 스캔해 Safari에서 열면 연결 코드가 자동 입력됩니다. Safari의 **공유 → 홈 화면에 추가**로 아이콘을 만들 수 있습니다. 평소 사용에는 Node.js, PowerShell 명령, Expo Go, Expo 계정이 필요하지 않습니다. 데스크톱 앱과 PC가 켜져 있어야 원격 작업을 실행할 수 있습니다.
+Windows 또는 macOS PC와 iPhone에 [Tailscale](https://tailscale.com/download)을 설치하고 같은 tailnet에 로그인합니다. 데스크톱 앱 상단의 **모바일 연결**을 누르면 Tailscale 인터페이스에 모바일 화면과 작업 서버를 자동으로 열고 QR 코드를 표시합니다. 아이폰 카메라로 QR을 스캔해 Safari에서 열면 연결 코드가 자동 입력됩니다. Safari의 **공유 → 홈 화면에 추가**로 아이콘을 만들 수 있습니다. 평소 사용에는 아이폰 소스 ZIP, Node.js, PowerShell 명령, Expo Go, Expo 계정이 필요하지 않습니다. 모바일 화면의 **프로젝트 선택**에서 프로젝트를 전환할 수 있습니다. 데스크톱 앱과 PC가 켜져 있어야 원격 작업을 실행할 수 있습니다.
 
 아이폰 화면 소스는 `mobile/`에 있습니다. 저장소 개발자는 Expo Go로도 화면을 시험할 수 있습니다. 정식 독립 앱의 TestFlight·App Store 배포에는 Apple 개발자 계정과 iOS 코드 서명이 필요합니다. 이 저장소에는 아직 서명된 IPA가 없습니다.
 
