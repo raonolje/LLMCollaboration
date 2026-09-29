@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
-import { ActivityIndicator, Alert, Platform, Pressable, ScrollView, StatusBar, StyleSheet, Text, TextInput, View, useWindowDimensions } from 'react-native';
-import { loadConnection, request, saveConnection, watchEvents, type Catalog, type Connection, type Event, type Operation, type Project, type Provider, type Snapshot, type Target, type Task } from './api';
+import { Alert, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StatusBar, StyleSheet, Text, TextInput, View } from 'react-native';
+import { loadConnection, request, saveConnection, watchEvents, type Catalog, type Connection, type Operation, type Project, type Provider, type Snapshot, type Target, type Task } from './api';
 
 const color = { dark: '#111c35', blue: '#5266e9', ink: '#172644', muted: '#7785a0', line: '#dfe5f0', white: '#fff' };
 const errorText = (error: unknown): string => error instanceof Error ? error.message : String(error);
@@ -15,7 +15,7 @@ function Panel({ title, children }: { title: string; children: React.ReactNode }
 }
 
 export default function App() {
-  const { width } = useWindowDimensions();
+  const historyRef = useRef<ScrollView>(null);
   const [connection, setConnection] = useState<Connection | null>(null);
   const [address, setAddress] = useState('');
   const [secret, setSecret] = useState('');
@@ -23,6 +23,12 @@ export default function App() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [catalogs, setCatalogs] = useState<Catalog[]>([]);
   const [tab, setTab] = useState<'chat' | 'tasks'>('chat');
+  const [chatView, setChatView] = useState<'all' | Provider>('all');
+  const [projectPicker, setProjectPicker] = useState(false);
+  const [modelPicker, setModelPicker] = useState(false);
+  const [taskEditor, setTaskEditor] = useState<'plan' | 'manual' | null>(null);
+  const [historyLimit, setHistoryLimit] = useState(30);
+  const [expandedMessages, setExpandedMessages] = useState<string[]>([]);
   const [target, setTarget] = useState<Target>('both');
   const [message, setMessage] = useState('');
   const [discussion, setDiscussion] = useState(false);
@@ -105,7 +111,7 @@ export default function App() {
     const content = message;
     const files = chatFiles.map(({ name, data }) => ({ name, data }));
     void act(async () => {
-      await request(connection, `/projects/${projectId}/chat`, { message: content, target, models, files, discussion });
+      await request(connection, `/projects/${projectId}/chat`, { message: content, target, models, files, discussion: target === 'both' && discussion });
       setMessage(''); setChatFiles([]);
     }, '지시를 전달했습니다. 답변은 자동으로 갱신됩니다.');
   };
@@ -115,9 +121,6 @@ export default function App() {
     if (action === 'execute') Alert.alert('업무 실행', `${task.title} 업무를 데스크톱에서 실행할까요?`, [{ text: '취소' }, { text: '실행', onPress: send }]);
     else send();
   };
-  const chat = (provider: Provider): Event[] => (snapshot?.events ?? []).filter((event) => event.actor === provider
-    || event.actor === 'user' && event.type === 'chat' && (event.metadata?.target === provider || event.metadata?.target === 'both')
-    || event.type === 'error' && event.metadata?.provider === provider).slice(-30);
   const activity = (provider: Provider): string => {
     const events = snapshot?.events ?? [];
     const latestRequest = [...events].reverse().find((event) => event.actor === 'user' && event.type === 'chat'
@@ -135,25 +138,177 @@ export default function App() {
     });
     const latest = [...(snapshot?.events ?? [])].reverse().find((event) => event.actor === provider);
     const title = snapshot?.tasks.find((task) => task.id === current?.taskId)?.title;
-    if (latestRequest && !completion && Date.now() - Date.parse(latestRequest.timestamp) < 10 * 60_000) return '답변 생성 중';
+    if (latestRequest && !completion && running.length > 0 && Date.now() - Date.parse(latestRequest.timestamp) < 10 * 60_000) return '답변 생성 중';
     return current ? `${title ? `${title} · ` : ''}${current.kind === 'chat' ? '답변 작성 중' : current.kind === 'debate' || current.kind === 'continue' ? '토론 중' : current.kind === 'execute' ? snapshot?.tasks.find((task) => task.id === current.taskId)?.status === 'reviewing' ? '교차 검수 중' : '구현 중' : '작업 중'}`
       : latest ? `최근 작업: ${latest.message.slice(0, 90)}` : '대기 중';
   };
-  return <View style={s.root}><StatusBar barStyle="light-content" /><View style={s.header}><Text style={s.brand}>LLM Collaboration</Text><Text style={s.subtitle}>{connection ? snapshot?.project.name ?? '프로젝트 선택' : 'iPhone 원격 연결'}</Text></View>
-    {!connection ? <ScrollView contentContainerStyle={s.content}><Panel title="데스크톱 연결"><Text style={s.hint}>PC와 iPhone을 같은 Tailscale 네트워크에 로그인한 뒤, 데스크톱 앱에서 원격 연결을 켜세요.</Text><TextInput style={s.input} placeholder="http://100.x.y.z:48721" autoCapitalize="none" value={address} onChangeText={setAddress} /><TextInput style={s.input} placeholder="연결 코드" autoCapitalize="none" secureTextEntry value={secret} onChangeText={setSecret} /><Button label="연결" active disabled={busy || !address || !secret} onPress={connect} /></Panel>{notice ? <Text style={s.notice}>{notice}</Text> : null}</ScrollView>
-      : <><View style={s.projectBar}>
-          <Text style={s.projectLabel}>프로젝트 선택</Text>
-          <ScrollView horizontal style={s.projects} contentContainerStyle={s.projectChoices} showsHorizontalScrollIndicator={false}>
-            {projects.map((project) => <Button key={project.id} label={project.name} active={projectId === project.id} onPress={() => { void act(() => request<Snapshot>(connection, `/projects/${project.id}`).then(setSnapshot), ''); }} />)}
-            <Button label="연결 해제" onPress={() => { void saveConnection(null).then(() => { setConnection(null); setSnapshot(null); }); }} />
-          </ScrollView>
-        </View><View style={s.tabBar}><Button label="대화" active={tab === 'chat'} onPress={() => setTab('chat')} /><Button label="업무" active={tab === 'tasks'} onPress={() => setTab('tasks')} /><Button label="갱신" onPress={() => { void act(() => refresh(connection, projectId), '갱신했습니다.'); }} /></View>
-        <ScrollView contentContainerStyle={s.content} keyboardShouldPersistTaps="handled">{notice ? <Text style={s.notice}>{notice}</Text> : null}{busy && <ActivityIndicator color={color.blue} />}{snapshot && <Panel title={`현재 진행 · ${live ? '실시간 연결' : '재연결 중'}`}>{(['codex', 'claude'] as Provider[]).map((provider) => <View key={provider} style={s.activity}><Text style={s.label}>{provider === 'codex' ? 'Codex' : 'Claude'}</Text><Text style={s.body}>{activity(provider)}</Text></View>)}</Panel>}{operations.filter((item) => item.state === 'error').slice(-1).map((item, index) => <Text key={index} style={s.error}>{item.error}</Text>)}
-          {snapshot && tab === 'chat' && <><Panel title="Codex · Claude 대화"><View style={[s.columns, width < 650 && { flexDirection: 'column' }]}>{(['codex', 'claude'] as Provider[]).map((provider) => <View key={provider} style={s.column}><Text style={s.label}>{provider === 'codex' ? 'Codex' : 'Claude'}</Text>{chat(provider).map((event) => <View key={event.id} style={[s.message, event.type === 'error' && s.error]}><Text style={s.meta}>{event.type === 'error' ? '오류' : event.actor === 'user' ? '나' : provider} · {date(event.timestamp)}</Text><Text selectable style={s.body}>{event.message}</Text></View>)}</View>)}</View></Panel>
-            <Panel title="지시 또는 질문"><View style={s.row}>{(['both', 'codex', 'claude'] as Target[]).map((option) => <Button key={option} label={option === 'both' ? '둘 다' : option === 'codex' ? 'Codex' : 'Claude'} active={target === option} onPress={() => setTarget(option)} />)}</View>{(['codex', 'claude'] as Provider[]).filter((provider) => target === 'both' || target === provider).map((provider) => { const catalog = catalogs.find((item) => item.provider === provider); const current = models[provider]; const choice = catalog?.models.find((item) => item.id === current.model); return <View key={provider} style={s.selector}><Text style={s.label}>{provider === 'codex' ? 'Codex' : 'Claude'} 모델</Text><ScrollView horizontal><View style={s.row}><Button label="기본" active={!current.model} onPress={() => setModels((old) => ({ ...old, [provider]: { model: '', effort: '' } }))} />{catalog?.models.map((model) => <Button key={model.id} label={model.label} active={current.model === model.id} onPress={() => setModels((old) => ({ ...old, [provider]: { model: model.id, effort: '' } }))} />)}</View></ScrollView>{choice && <View style={s.row}><Button label="기본 추론" active={!current.effort} onPress={() => setModels((old) => ({ ...old, [provider]: { ...old[provider], effort: '' } }))} />{choice.efforts.map((effort) => <Button key={effort} label={effort} active={current.effort === effort} onPress={() => setModels((old) => ({ ...old, [provider]: { ...old[provider], effort } }))} />)}</View>}</View>; })}<TextInput style={[s.input, s.multiline]} multiline placeholder="모델에 전달할 지시나 질문" value={message} onChangeText={setMessage} /><Button label={`두 모델 토론 · ${discussion ? "켜짐" : "꺼짐"} (${snapshot.project.defaultDebateRounds}회 왕복)`} active={discussion} disabled={target !== "both"} onPress={() => setDiscussion((current) => !current)} /><Button label="＋ 이미지·파일 첨부" disabled={busy || chatFiles.length >= 5} onPress={pickChatFiles} />{chatFiles.map((file, index) => <Button key={`${file.name}-${index}`} label={`📎 ${file.name} ×`} onPress={() => setChatFiles((current) => current.filter((_, position) => position !== index))} />)}<Button label="메시지 보내기" active disabled={busy || (!message.trim() && !chatFiles.length)} onPress={sendChat} /><Button label="응답 중단" onPress={() => command(`/projects/${projectId}/cancel-chat`, {}, '중단을 요청했습니다.')} /></Panel></>}
-          {snapshot && tab === 'tasks' && <><Panel title="업무 자동 계획"><TextInput style={[s.input, s.multiline]} multiline placeholder="목표와 완료 기준" value={plan} onChangeText={setPlan} /><Button label="계획 요청" active disabled={busy || !plan.trim()} onPress={() => { command(`/projects/${projectId}/plan`, { request: plan }, '계획을 요청했습니다.'); setPlan(''); }} /></Panel><Panel title="직접 업무 지정"><TextInput style={s.input} placeholder="업무 제목" value={taskTitle} onChangeText={setTaskTitle} /><TextInput style={[s.input, s.multiline]} multiline placeholder="설명과 완료 기준" value={taskDescription} onChangeText={setTaskDescription} /><Text style={s.label}>실행 담당</Text><View style={s.row}>{(['codex', 'claude'] as Provider[]).map((provider) => <Button key={provider} label={provider} active={executor === provider} onPress={() => setExecutor(provider)} />)}</View><Button label="업무 추가" active disabled={busy || !taskTitle.trim() || !taskDescription.trim()} onPress={() => { command(`/projects/${projectId}/tasks`, { title: taskTitle, description: taskDescription, acceptanceCriteria: [taskDescription], mode: 'manual', executor: { provider: executor, model: 'default' }, reviewer: { provider: executor === 'codex' ? 'claude' : 'codex', model: 'default' }, dependsOn: [], debateRounds: snapshot.project.defaultDebateRounds }, '업무를 추가했습니다.'); setTaskTitle(''); setTaskDescription(''); }} /></Panel><Panel title="업무 진행">{snapshot.tasks.map((task) => <View key={task.id} style={s.task}><Text style={s.label}>{task.title}</Text><Text style={s.hint}>{task.status} · {task.executor.provider} 실행 · {task.reviewer.provider} 검수</Text><Text style={s.body}>{task.description}</Text><View style={s.row}><Button label="토론" onPress={() => runTask(task, 'debate')} /><Button label="실행" active onPress={() => runTask(task, 'execute')} /><Button label="중단" onPress={() => runTask(task, 'cancel')} /></View><TextInput style={s.input} placeholder="추가 반론이나 작업 수정" value={followUps[task.id] ?? ''} onChangeText={(value) => setFollowUps((old) => ({ ...old, [task.id]: value }))} /><Button label="추가 토론 · 1회 왕복" disabled={!(followUps[task.id] ?? '').trim()} onPress={() => { command(`/projects/${projectId}/tasks/${task.id}/continue`, { message: followUps[task.id], target: 'both', additionalRounds: 1 }, '추가 토론을 요청했습니다.'); setFollowUps((old) => ({ ...old, [task.id]: '' })); }} /></View>)}</Panel></>}
-        </ScrollView></>}
-  </View>;
+  const timeline = (snapshot?.events ?? []).filter((event) => event.actor === 'codex' || event.actor === 'claude'
+    || event.actor === 'user' && event.type === 'chat' || event.type === 'error');
+  const filtered = timeline.filter((event) => chatView === 'all' || event.actor === chatView
+    || event.actor === 'user' && (event.metadata?.target === chatView || event.metadata?.target === 'both')
+    || event.type === 'error' && event.metadata?.provider === chatView);
+  const visible = filtered.slice(-historyLimit);
+  useEffect(() => { historyRef.current?.scrollToEnd({ animated: true }); }, [visible.at(-1)?.id, chatView]);
+  const modelControl = (provider: Provider): React.ReactNode => {
+    const catalog = catalogs.find((item) => item.provider === provider);
+    const choice = catalog?.models.find((item) => item.id === models[provider].model);
+    return <View key={provider} style={s.selector}><Text style={s.label}>{provider === 'codex' ? 'Codex' : 'Claude'} 모델</Text>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.horizontal}>
+        <Button label="기본 모델" active={!models[provider].model} onPress={() => setModels((old) => ({ ...old, [provider]: { model: '', effort: '' } }))} />
+        {catalog?.models.map((model) => <Button key={model.id} label={model.label} active={models[provider].model === model.id}
+          onPress={() => setModels((old) => ({ ...old, [provider]: { model: model.id, effort: '' } }))} />)}
+      </ScrollView>
+      {choice && <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.horizontal}>
+        <Button label="기본 추론" active={!models[provider].effort} onPress={() => setModels((old) => ({ ...old, [provider]: { ...old[provider], effort: '' } }))} />
+        {choice.efforts.map((effort) => <Button key={effort} label={effort} active={models[provider].effort === effort}
+          onPress={() => setModels((old) => ({ ...old, [provider]: { ...old[provider], effort } }))} />)}
+      </ScrollView>}</View>;
+  };
+  return <KeyboardAvoidingView style={s.root} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+    <StatusBar barStyle="light-content" />
+    <View style={s.header}><Text style={s.brand}>LLM Collaboration</Text>
+      {connection ? <Pressable onPress={() => setProjectPicker(true)} style={s.projectSwitch}>
+        <Text numberOfLines={1} style={s.projectName}>{snapshot?.project.name ?? '프로젝트 선택'} ▾</Text>
+        <Text style={s.connection}>{live ? '● 연결됨' : '○ 재연결 중'}</Text>
+      </Pressable> : <Text style={s.subtitle}>iPhone 원격 연결</Text>}</View>
+    {!connection ? <ScrollView contentContainerStyle={s.content} keyboardShouldPersistTaps="handled"><Panel title="데스크톱 연결">
+      <Text style={s.hint}>PC와 iPhone을 같은 Tailscale 네트워크에 연결한 뒤 PC 앱에서 모바일 연결을 켜세요.</Text>
+      <TextInput style={s.input} placeholder="http://100.x.y.z:48721" autoCapitalize="none" value={address} onChangeText={setAddress} />
+      <TextInput style={s.input} placeholder="연결 코드" autoCapitalize="none" secureTextEntry value={secret} onChangeText={setSecret} />
+      <Button label="연결하기" active disabled={busy || !address || !secret} onPress={connect} /></Panel>
+      {notice ? <Text style={s.notice}>{notice}</Text> : null}</ScrollView> : <>
+      <View style={s.tabBar}>
+        {(['chat', 'tasks'] as const).map((item) => <Pressable key={item} onPress={() => setTab(item)} style={[s.tab, tab === item && s.tabActive]}>
+          <Text style={[s.tabText, tab === item && s.tabTextActive]}>{item === 'chat' ? '대화' : `업무 ${snapshot?.tasks.length ?? 0}`}</Text></Pressable>)}
+        <Pressable style={s.refresh} accessibilityLabel="새로고침" onPress={() => { void act(() => refresh(connection, projectId), '갱신했습니다.'); }}><Text style={s.refreshText}>↻</Text></Pressable>
+      </View>
+      {notice ? <Text style={s.inlineNotice} numberOfLines={2}>{notice}</Text> : null}
+      {tab === 'chat' ? <>
+        <View style={s.statusStrip}>{(['codex', 'claude'] as Provider[]).map((provider) => <Pressable key={provider} style={s.statusItem} onPress={() => setChatView(provider)}>
+          <Text style={s.statusName}>{provider === 'codex' ? 'Codex' : 'Claude'}</Text><Text numberOfLines={1} style={s.statusText}>{activity(provider)}</Text>
+        </Pressable>)}</View>
+        <View style={s.filterBar}>{(['all', 'codex', 'claude'] as const).map((item) => <Pressable key={item} style={[s.filter, chatView === item && s.filterActive]} onPress={() => { setChatView(item); setHistoryLimit(30); }}>
+          <Text style={[s.filterText, chatView === item && s.filterTextActive]}>{item === 'all' ? '전체 대화' : item === 'codex' ? 'Codex' : 'Claude'}</Text></Pressable>)}</View>
+        <ScrollView ref={historyRef} style={s.history} contentContainerStyle={s.historyContent} keyboardShouldPersistTaps="handled">
+          {filtered.length > visible.length && <Button label="이전 대화 더 보기" onPress={() => setHistoryLimit((current) => current + 30)} />}
+          {!visible.length && <View style={s.empty}><Text style={s.emptyTitle}>아직 대화가 없습니다</Text><Text style={s.hint}>아래에서 지시를 보내세요.</Text></View>}
+          {visible.map((event) => {
+            const fromUser = event.actor === 'user';
+            const expanded = expandedMessages.includes(event.id);
+            const long = event.message.length > 1600;
+            return <View key={event.id} style={[s.bubble, fromUser && s.userBubble, event.type === 'error' && s.errorBubble]}>
+              <View style={s.bubbleHead}><Text style={s.bubbleActor}>{event.type === 'error' ? '오류' : fromUser ? '나' : event.actor === 'codex' ? 'Codex' : 'Claude'}</Text><Text style={s.meta}>{date(event.timestamp)}</Text></View>
+              <Text selectable style={s.body}>{long && !expanded ? `${event.message.slice(0, 1600)}…` : event.message}</Text>
+              {long && <Pressable onPress={() => setExpandedMessages((old) => expanded ? old.filter((id) => id !== event.id) : [...old, event.id])}><Text style={s.expand}>{expanded ? '접기' : '전체 답변 보기'}</Text></Pressable>}
+            </View>;
+          })}
+          {operations.some((item) => item.state === 'running' && item.projectId === projectId) && <Text style={s.working}>● 응답 또는 작업 진행 중…</Text>}
+        </ScrollView>
+        <View style={s.composer}>
+          <View style={s.composerTop}><View style={s.targets}>{(['both', 'codex', 'claude'] as Target[]).map((item) => <Pressable key={item} onPress={() => setTarget(item)} style={[s.target, target === item && s.targetActive]}>
+            <Text style={[s.targetText, target === item && s.targetTextActive]}>{item === 'both' ? '둘 다' : item === 'codex' ? 'Codex' : 'Claude'}</Text></Pressable>)}</View>
+            <Pressable onPress={() => setModelPicker(true)}><Text style={s.settings}>모델·토론 ⚙</Text></Pressable></View>
+          <Text numberOfLines={1} style={s.composerSummary}>{target === 'both' ? `Codex ${models.codex.model || '기본'} · Claude ${models.claude.model || '기본'}` : `${target === 'codex' ? 'Codex' : 'Claude'} ${models[target].model || '기본'}`}{target === 'both' && discussion ? ` · 토론 ${snapshot?.project.defaultDebateRounds ?? 2}회` : ''}</Text>
+          {chatFiles.length > 0 && <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.horizontal}>{chatFiles.map((file, index) => <Pressable key={`${file.name}-${index}`} style={s.fileChip} onPress={() => setChatFiles((old) => old.filter((_, position) => position !== index))}><Text numberOfLines={1}>📎 {file.name} ×</Text></Pressable>)}</ScrollView>}
+          <View style={s.composerInput}><Pressable style={s.attach} accessibilityLabel="파일 첨부" disabled={busy || chatFiles.length >= 5} onPress={pickChatFiles}><Text style={s.attachText}>＋</Text></Pressable>
+            <TextInput style={s.chatInput} multiline placeholder="지시하거나 질문하세요" value={message} onChangeText={setMessage} />
+            <Pressable style={[s.send, (busy || (!message.trim() && !chatFiles.length)) && s.sendDisabled]} accessibilityLabel="메시지 보내기" disabled={busy || (!message.trim() && !chatFiles.length)} onPress={sendChat}><Text style={s.sendText}>➤</Text></Pressable></View>
+          {operations.some((item) => item.state === 'running' && item.projectId === projectId) && <Pressable onPress={() => command(`/projects/${projectId}/cancel-chat`, {}, '중단을 요청했습니다.')}><Text style={s.cancel}>응답 중단</Text></Pressable>}
+        </View>
+      </> : <ScrollView style={s.history} contentContainerStyle={s.content} keyboardShouldPersistTaps="handled">
+        <View style={s.row}><Button label="＋ 직접 업무" active onPress={() => setTaskEditor(taskEditor === 'manual' ? null : 'manual')} /><Button label="자동 계획" onPress={() => setTaskEditor(taskEditor === 'plan' ? null : 'plan')} /></View>
+        {taskEditor === 'plan' && <Panel title="업무 자동 계획"><TextInput style={[s.input, s.multiline]} multiline placeholder="목표와 완료 기준" value={plan} onChangeText={setPlan} /><Button label="계획 요청" active disabled={busy || !plan.trim()} onPress={() => { command(`/projects/${projectId}/plan`, { request: plan }, '계획을 요청했습니다.'); setPlan(''); setTaskEditor(null); }} /></Panel>}
+        {taskEditor === 'manual' && <Panel title="직접 업무 지정"><TextInput style={s.input} placeholder="업무 제목" value={taskTitle} onChangeText={setTaskTitle} /><TextInput style={[s.input, s.multiline]} multiline placeholder="설명과 완료 기준" value={taskDescription} onChangeText={setTaskDescription} /><Text style={s.label}>실행 담당</Text><View style={s.row}>{(['codex', 'claude'] as Provider[]).map((provider) => <Button key={provider} label={provider} active={executor === provider} onPress={() => setExecutor(provider)} />)}</View><Button label="업무 추가" active disabled={busy || !taskTitle.trim() || !taskDescription.trim()} onPress={() => { command(`/projects/${projectId}/tasks`, { title: taskTitle, description: taskDescription, acceptanceCriteria: [taskDescription], mode: 'manual', executor: { provider: executor, model: 'default' }, reviewer: { provider: executor === 'codex' ? 'claude' : 'codex', model: 'default' }, dependsOn: [], debateRounds: snapshot!.project.defaultDebateRounds }, '업무를 추가했습니다.'); setTaskTitle(''); setTaskDescription(''); setTaskEditor(null); }} /></Panel>}
+        {!snapshot?.tasks.length && <View style={s.empty}><Text style={s.emptyTitle}>등록된 업무가 없습니다</Text><Text style={s.hint}>위에서 업무를 추가하거나 자동 계획을 요청하세요.</Text></View>}
+        {snapshot?.tasks.map((task) => <View key={task.id} style={s.taskCard}><Text style={s.taskTitle}>{task.title}</Text><Text style={s.taskMeta}>{task.status} · {task.executor.provider} 실행 · {task.reviewer.provider} 검수</Text><Text style={s.body}>{task.description}</Text><View style={s.row}><Button label="토론" onPress={() => runTask(task, 'debate')} /><Button label="실행" active onPress={() => runTask(task, 'execute')} /><Button label="중단" onPress={() => runTask(task, 'cancel')} /></View><TextInput style={s.input} placeholder="추가 반론이나 작업 수정" value={followUps[task.id] ?? ''} onChangeText={(value) => setFollowUps((old) => ({ ...old, [task.id]: value }))} /><Button label="추가 토론 · 1회 왕복" disabled={!(followUps[task.id] ?? '').trim()} onPress={() => { command(`/projects/${projectId}/tasks/${task.id}/continue`, { message: followUps[task.id], target: 'both', additionalRounds: 1 }, '추가 토론을 요청했습니다.'); setFollowUps((old) => ({ ...old, [task.id]: '' })); }} /></View>)}
+      </ScrollView>}
+    </>}
+    <Modal visible={projectPicker} animationType="slide" transparent onRequestClose={() => setProjectPicker(false)}><View style={s.modalBackdrop}><View style={s.modalSheet}><View style={s.modalHead}><Text style={s.title}>프로젝트 선택</Text><Pressable onPress={() => setProjectPicker(false)}><Text style={s.close}>닫기</Text></Pressable></View><ScrollView style={s.modalList}>{projects.map((project) => <Pressable key={project.id} style={s.projectOption} onPress={() => { setProjectPicker(false); setHistoryLimit(30); void request<Snapshot>(connection!, `/projects/${project.id}`).then((selected) => { setSnapshot(selected); setNotice(''); }).catch((error: unknown) => setNotice(errorText(error))); }}><Text style={s.projectOptionText}>{project.name}</Text>{project.id === projectId && <Text style={s.check}>✓</Text>}</Pressable>)}</ScrollView><Button label="연결 해제" onPress={() => { setProjectPicker(false); void saveConnection(null).then(() => { setConnection(null); setSnapshot(null); }); }} /></View></View></Modal>
+    <Modal visible={modelPicker} animationType="slide" transparent onRequestClose={() => setModelPicker(false)}><View style={s.modalBackdrop}><View style={s.modalSheet}><View style={s.modalHead}><Text style={s.title}>모델·토론 설정</Text><Pressable onPress={() => setModelPicker(false)}><Text style={s.close}>완료</Text></Pressable></View><ScrollView style={s.modalList} contentContainerStyle={s.modalContent}>{(['codex', 'claude'] as Provider[]).filter((provider) => target === 'both' || target === provider).map(modelControl)}<Pressable style={s.discussion} disabled={target !== 'both'} onPress={() => setDiscussion((old) => !old)}><Text style={s.label}>두 모델 토론 · {snapshot?.project.defaultDebateRounds ?? 2}회 왕복</Text><Text style={s.check}>{discussion && target === 'both' ? '켜짐' : '꺼짐'}</Text></Pressable></ScrollView></View></View></Modal>
+  </KeyboardAvoidingView>;
 }
 
-const s = StyleSheet.create({ root: { flex: 1, backgroundColor: '#f5f7fb' }, header: { backgroundColor: color.dark, paddingTop: Platform.OS === 'web' ? 24 : 55, paddingBottom: 17, paddingHorizontal: 19 }, brand: { color: color.white, fontWeight: '800', fontSize: 21 }, subtitle: { color: '#adbcdf', marginTop: 5 }, content: { padding: 13, paddingBottom: 50, gap: 12 }, panel: { padding: 15, borderRadius: 16, backgroundColor: color.white, borderWidth: 1, borderColor: color.line, gap: 11 }, title: { color: color.ink, fontWeight: '800', fontSize: 17 }, label: { color: color.ink, fontWeight: '700' }, hint: { color: color.muted, fontSize: 13, lineHeight: 19 }, input: { borderWidth: 1, borderColor: color.line, borderRadius: 10, padding: 11, color: color.ink, fontSize: 15 }, multiline: { minHeight: 85, textAlignVertical: 'top' }, button: { borderWidth: 1, borderColor: color.line, backgroundColor: color.white, paddingHorizontal: 12, paddingVertical: 9, borderRadius: 9, alignSelf: 'flex-start' }, activeButton: { backgroundColor: color.blue, borderColor: color.blue }, buttonText: { color: color.ink, fontWeight: '700', fontSize: 13 }, row: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, padding: 1 }, projectBar: { backgroundColor: color.white, borderBottomColor: color.line, borderBottomWidth: 1, paddingTop: 10 }, projectLabel: { color: color.muted, fontSize: 12, fontWeight: '700', paddingHorizontal: 14 }, projects: { height: 56, flexGrow: 0, flexShrink: 0 }, projectChoices: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 13, paddingVertical: 5 }, tabBar: { flexDirection: 'row', gap: 8, padding: 10 }, notice: { padding: 11, backgroundColor: '#e8edff', color: color.ink, borderRadius: 9 }, error: { padding: 11, backgroundColor: '#ffebed', color: '#b53844', borderRadius: 9 }, columns: { flexDirection: 'row', gap: 8 }, column: { flex: 1, gap: 8 }, message: { padding: 8, borderColor: color.line, borderWidth: 1, borderRadius: 9 }, meta: { color: color.muted, fontSize: 10, marginBottom: 4 }, body: { color: color.ink, lineHeight: 19, fontSize: 13 }, selector: { gap: 7, borderTopColor: color.line, borderTopWidth: 1, paddingTop: 9 }, task: { gap: 8, borderTopColor: color.line, borderTopWidth: 1, paddingTop: 12 }, activity: { gap: 4, borderTopColor: color.line, borderTopWidth: 1, paddingTop: 9 } });
+const s = StyleSheet.create({
+  root: { flex: 1, backgroundColor: '#f5f7fb' },
+  header: { backgroundColor: color.dark, paddingTop: Platform.OS === 'web' ? 16 : 52, paddingBottom: 14, paddingHorizontal: 18 },
+  brand: { color: color.white, fontWeight: '800', fontSize: 17 },
+  subtitle: { color: '#adbcdf', marginTop: 7 },
+  projectSwitch: { marginTop: 8, flexDirection: 'row', alignItems: 'center', gap: 8 },
+  projectName: { flex: 1, color: color.white, fontSize: 20, fontWeight: '800' },
+  connection: { color: '#a8e5c4', fontSize: 11 },
+  content: { padding: 14, paddingBottom: 32, gap: 12 },
+  panel: { padding: 16, borderRadius: 16, backgroundColor: color.white, borderWidth: 1, borderColor: color.line, gap: 12 },
+  title: { color: color.ink, fontWeight: '800', fontSize: 18 },
+  label: { color: color.ink, fontWeight: '700', fontSize: 14 },
+  hint: { color: color.muted, fontSize: 13, lineHeight: 20 },
+  input: { borderWidth: 1, borderColor: color.line, borderRadius: 12, padding: 12, color: color.ink, fontSize: 15, backgroundColor: color.white },
+  multiline: { minHeight: 88, textAlignVertical: 'top' },
+  button: { minHeight: 42, justifyContent: 'center', borderWidth: 1, borderColor: color.line, backgroundColor: color.white, paddingHorizontal: 13, paddingVertical: 8, borderRadius: 11, alignSelf: 'flex-start' },
+  activeButton: { backgroundColor: color.blue, borderColor: color.blue },
+  buttonText: { color: color.ink, fontWeight: '700', fontSize: 13 },
+  row: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  horizontal: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 4 },
+  tabBar: { flexDirection: 'row', backgroundColor: color.white, borderBottomWidth: 1, borderBottomColor: color.line, paddingHorizontal: 14, alignItems: 'center' },
+  tab: { minHeight: 48, justifyContent: 'center', paddingHorizontal: 14, marginRight: 7 },
+  tabActive: { borderBottomWidth: 3, borderBottomColor: color.blue },
+  tabText: { color: color.muted, fontSize: 15, fontWeight: '700' },
+  tabTextActive: { color: color.blue },
+  refresh: { marginLeft: 'auto', width: 42, height: 42, alignItems: 'center', justifyContent: 'center' },
+  refreshText: { color: color.blue, fontSize: 26 },
+  notice: { padding: 12, backgroundColor: '#e8edff', color: color.ink, borderRadius: 10 },
+  inlineNotice: { paddingHorizontal: 14, paddingVertical: 7, backgroundColor: '#e8edff', color: color.ink, fontSize: 12 },
+  statusStrip: { flexDirection: 'row', gap: 8, paddingHorizontal: 12, paddingVertical: 9 },
+  statusItem: { flex: 1, backgroundColor: color.white, borderWidth: 1, borderColor: color.line, borderRadius: 11, paddingHorizontal: 11, paddingVertical: 8 },
+  statusName: { color: color.ink, fontWeight: '800', fontSize: 12 },
+  statusText: { color: color.muted, fontSize: 11, marginTop: 2 },
+  filterBar: { flexDirection: 'row', gap: 7, paddingHorizontal: 13, paddingBottom: 9 },
+  filter: { paddingHorizontal: 12, minHeight: 34, justifyContent: 'center', borderRadius: 18, backgroundColor: color.white, borderWidth: 1, borderColor: color.line },
+  filterActive: { backgroundColor: color.dark, borderColor: color.dark },
+  filterText: { color: color.ink, fontSize: 12, fontWeight: '700' },
+  filterTextActive: { color: color.white },
+  history: { flex: 1 },
+  historyContent: { paddingHorizontal: 12, paddingBottom: 20, gap: 10 },
+  empty: { padding: 30, borderRadius: 16, backgroundColor: color.white, alignItems: 'center', gap: 5 },
+  emptyTitle: { color: color.ink, fontSize: 16, fontWeight: '800' },
+  bubble: { alignSelf: 'stretch', backgroundColor: color.white, borderWidth: 1, borderColor: color.line, borderRadius: 15, padding: 13, gap: 6 },
+  userBubble: { backgroundColor: '#e9eeff', borderColor: '#d8e0ff', marginLeft: 28 },
+  errorBubble: { backgroundColor: '#fff0f1', borderColor: '#ffcbd0' },
+  bubbleHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  bubbleActor: { color: color.ink, fontWeight: '800', fontSize: 13 },
+  meta: { color: color.muted, fontSize: 11 },
+  body: { color: color.ink, lineHeight: 22, fontSize: 14 },
+  expand: { color: color.blue, fontWeight: '700', paddingVertical: 6 },
+  working: { color: color.blue, fontWeight: '700', padding: 10 },
+  composer: { backgroundColor: color.white, borderTopWidth: 1, borderTopColor: color.line, paddingHorizontal: 11, paddingTop: 9, paddingBottom: Platform.OS === 'web' ? 12 : 24, gap: 8 },
+  composerTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 5 },
+  targets: { flexDirection: 'row', gap: 4 },
+  target: { borderRadius: 9, paddingHorizontal: 9, paddingVertical: 7 },
+  targetActive: { backgroundColor: '#e8edff' },
+  targetText: { color: color.muted, fontSize: 12, fontWeight: '700' },
+  targetTextActive: { color: color.blue },
+  settings: { color: color.ink, fontSize: 12, fontWeight: '700' },
+  composerSummary: { color: color.muted, fontSize: 11 },
+  fileChip: { maxWidth: 180, backgroundColor: '#edf1fa', borderRadius: 8, padding: 7 },
+  composerInput: { flexDirection: 'row', alignItems: 'flex-end', gap: 8 },
+  attach: { width: 42, height: 42, alignItems: 'center', justifyContent: 'center', borderRadius: 12, backgroundColor: '#f0f3fa' },
+  attachText: { color: color.ink, fontSize: 27, lineHeight: 32 },
+  chatInput: { flex: 1, minHeight: 42, maxHeight: 120, borderWidth: 1, borderColor: color.line, borderRadius: 13, paddingHorizontal: 12, paddingVertical: 9, color: color.ink, fontSize: 15, textAlignVertical: 'top' },
+  send: { width: 42, height: 42, alignItems: 'center', justifyContent: 'center', borderRadius: 12, backgroundColor: color.blue },
+  sendDisabled: { opacity: 0.45 },
+  sendText: { color: color.white, fontSize: 20 },
+  cancel: { color: '#b53844', fontSize: 12, fontWeight: '700', textAlign: 'right' },
+  taskCard: { backgroundColor: color.white, borderWidth: 1, borderColor: color.line, borderRadius: 16, padding: 15, gap: 10 },
+  taskTitle: { color: color.ink, fontSize: 16, fontWeight: '800' },
+  taskMeta: { color: color.muted, fontSize: 12 },
+  modalBackdrop: { flex: 1, backgroundColor: '#101b35aa', justifyContent: 'flex-end' },
+  modalSheet: { backgroundColor: color.white, borderTopLeftRadius: 22, borderTopRightRadius: 22, padding: 18, paddingBottom: Platform.OS === 'web' ? 18 : 34, maxHeight: '82%', gap: 12 },
+  modalHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  close: { color: color.blue, fontSize: 15, fontWeight: '700' },
+  modalList: { flexGrow: 0 },
+  modalContent: { gap: 16, paddingBottom: 12 },
+  projectOption: { minHeight: 55, borderBottomWidth: 1, borderBottomColor: color.line, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  projectOptionText: { color: color.ink, fontSize: 16, fontWeight: '700', flex: 1 },
+  check: { color: color.blue, fontWeight: '800' },
+  selector: { gap: 9, paddingVertical: 8 },
+  discussion: { borderTopWidth: 1, borderTopColor: color.line, flexDirection: 'row', justifyContent: 'space-between', paddingTop: 17 },
+});
