@@ -5,7 +5,7 @@ import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-const { execFileAsync, spawnCli } = vi.hoisted(() => ({ execFileAsync: vi.fn(), spawnCli: vi.fn() }));
+const { execFileAsync, spawnCli, spawnPty } = vi.hoisted(() => ({ execFileAsync: vi.fn(), spawnCli: vi.fn(), spawnPty: vi.fn() }));
 
 vi.mock('node:child_process', async (importOriginal) => {
   const original = await importOriginal<typeof import('node:child_process')>();
@@ -14,8 +14,9 @@ vi.mock('node:child_process', async (importOriginal) => {
   Object.defineProperty(execFile, promisify.custom, { value: execFileAsync });
   return { ...original, execFile, spawn: spawnCli };
 });
+vi.mock('node-pty', () => ({ spawn: spawnPty }));
 
-import { assertSubscription, cliArguments, cliStatus, openCliSession, resolveCliExecutable, runCli } from '../src/main/services/cli';
+import { assertSubscription, cliArguments, cliStatus, handoffClaudeToDesktop, openCliSession, resolveCliExecutable, runCli } from '../src/main/services/cli';
 
 const savedEnvironment = {
   path: process.env.PATH,
@@ -29,6 +30,7 @@ afterEach(() => {
   else process.env.LOCALAPPDATA = savedEnvironment.localAppData;
   execFileAsync.mockReset();
   spawnCli.mockReset();
+  spawnPty.mockReset();
 });
 
 const withTemporaryWorkspace = async <T>(run: (workspace: string) => Promise<T>): Promise<T> => {
@@ -262,5 +264,49 @@ describe.skipIf(process.platform !== 'win32')('Windows CLI discovery and executi
     await openCliSession('codex', sessionId, workspace);
     expect(spawnCli).toHaveBeenCalledWith('cmd.exe', ['/d', '/k', `"${binary}" resume --include-non-interactive ${sessionId}`], expect.any(Object));
     expect(child.unref).toHaveBeenCalledOnce();
+  }));
+
+  it('sends /desktop once when the interactive Claude prompt is ready', () => withTemporaryWorkspace(async (workspace) => {
+    process.env.PATH = workspace;
+    const binary = path.join(workspace, 'claude.exe');
+    const sessionId = '00000000-0000-4000-8000-000000000003';
+    await writeFile(binary, '', 'utf8');
+    execFileAsync.mockResolvedValue({ stdout: '{"loggedIn":true,"authMethod":"claude.ai"}', stderr: '' });
+    let onData: ((chunk: string) => void) | undefined;
+    let onExit: ((event: { exitCode: number }) => void) | undefined;
+    const terminal = {
+      onData: vi.fn((callback: typeof onData) => { onData = callback; }),
+      onExit: vi.fn((callback: typeof onExit) => { onExit = callback; }),
+      write: vi.fn(() => onExit?.({ exitCode: 0 })),
+      kill: vi.fn(),
+    };
+    spawnPty.mockReturnValue(terminal);
+    const handoff = handoffClaudeToDesktop(sessionId, workspace);
+    await vi.waitFor(() => expect(onData).toBeDefined());
+    onData?.('────────────────────────────────────────────────────────────────>\r\nshift+tab to cycle');
+    await handoff;
+    expect(spawnPty).toHaveBeenCalledWith(binary, ['--resume', sessionId], expect.objectContaining({ cwd: workspace }));
+    expect(terminal.write).toHaveBeenCalledExactlyOnceWith('/desktop\r');
+    expect(terminal.kill).toHaveBeenCalledOnce();
+  }));
+
+  it('does not approve Claude project trust prompts automatically', () => withTemporaryWorkspace(async (workspace) => {
+    process.env.PATH = workspace;
+    await writeFile(path.join(workspace, 'claude.exe'), '', 'utf8');
+    execFileAsync.mockResolvedValue({ stdout: '{"loggedIn":true,"authMethod":"claude.ai"}', stderr: '' });
+    let onData: ((chunk: string) => void) | undefined;
+    const terminal = {
+      onData: vi.fn((callback: typeof onData) => { onData = callback; }),
+      onExit: vi.fn(),
+      write: vi.fn(),
+      kill: vi.fn(),
+    };
+    spawnPty.mockReturnValue(terminal);
+    const handoff = handoffClaudeToDesktop('00000000-0000-4000-8000-000000000004', workspace);
+    await vi.waitFor(() => expect(onData).toBeDefined());
+    onData?.('Quick safety check: Is this a project you created? Yes, I trust this folder');
+    await expect(handoff).rejects.toThrow('폴더 신뢰 확인');
+    expect(terminal.write).not.toHaveBeenCalled();
+    expect(terminal.kill).toHaveBeenCalledOnce();
   }));
 });

@@ -47,6 +47,7 @@ export type ExternalSession = Readonly<{
   cwd: string;
   createdAt: string;
   updatedAt: string;
+  handedOffAt?: string;
 }>;
 
 export type SessionTurn = Readonly<{

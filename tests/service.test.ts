@@ -12,6 +12,7 @@ import type { CollaborationEvent, TaskInput } from '../src/shared/types';
 vi.mock('../src/main/services/cli', () => ({
   assertSubscription: vi.fn(async () => undefined),
   cliStatus: vi.fn(async (provider: 'codex' | 'claude') => ({ provider, installed: true, authentication: 'mock subscription' })),
+  handoffClaudeToDesktop: vi.fn(async () => undefined),
   runCli: vi.fn(async () => { throw new Error('A test must inject runModel; do not invoke a real model CLI.'); }),
 }));
 
@@ -56,6 +57,29 @@ const recordMockTranscript = async (request: CliRequest, text: string): Promise<
 };
 
 describe('service orchestration with an injected model', () => {
+  it('marks a handed-off Claude session and starts a fresh CLI session for later app chat', () => withTemporaryWorkspace(async (workspace) => {
+    const projectPath = path.join(workspace, 'project');
+    const calls: CliRequest[] = [];
+    const handoffClaude = vi.fn(async () => undefined);
+    const service = createService({ registryPath: path.join(workspace, 'registry.json'), emit: () => undefined,
+      handoffClaude,
+      runModel: async (request) => {
+        calls.push(request);
+        return { ...await recordMockTranscript(request, `${request.choice.provider} response`), sessionId: request.sessionId ?? randomUUID() };
+      },
+    });
+    const created = await service.createProject({ path: projectPath, name: 'Desktop handoff', goal: 'Keep conversations traceable' });
+    const session = created.project.sessions?.find((item) => item.provider === 'claude');
+    expect(session).toBeDefined();
+    await service.handoffClaudeSession(projectPath, session!.sessionId);
+    const moved = await service.openProject(projectPath);
+    expect(moved.project.sessions?.find((item) => item.sessionId === session!.sessionId)?.handedOffAt).toBeTruthy();
+    expect(handoffClaude).toHaveBeenCalledWith(session!.sessionId, projectPath, undefined);
+    await service.sendProjectMessage(projectPath, 'Continue in the app', 'claude');
+    expect(calls.filter((item) => item.choice.provider === 'claude').at(-1)?.sessionId).toBeUndefined();
+    await expect(service.handoffClaudeSession(projectPath, session!.sessionId)).rejects.toThrow('이미 Claude Code 데스크톱으로 이동');
+  }), 30_000);
+
   it('sends project chat to both or one provider, resumes sessions, and keeps targeted directions scoped', () => withTemporaryWorkspace(async (workspace) => {
     const projectPath = path.join(workspace, 'project');
     const calls: CliRequest[] = [];

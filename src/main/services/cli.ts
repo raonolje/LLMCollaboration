@@ -7,6 +7,7 @@ import path from 'node:path';
 import { finished } from 'node:stream/promises';
 import { promisify } from 'node:util';
 import crossSpawn from 'cross-spawn';
+import * as pty from 'node-pty';
 import type { CliStatus, ModelChoice, Provider } from '../../shared/types';
 import { projectFiles } from './repository';
 
@@ -247,6 +248,61 @@ export const openCliSession = async (provider: Provider, sessionId: string, cwd:
     });
     child.once('error', reject);
     child.once('spawn', () => { child.unref(); resolve(); });
+  });
+};
+
+export const handoffClaudeToDesktop = async (sessionId: string, cwd: string, configuredPath?: string): Promise<void> => {
+  if (!isSessionId(sessionId)) throw new Error('Claude 대화 세션 ID가 올바르지 않습니다.');
+  if (process.platform !== 'win32' && process.platform !== 'darwin') throw new Error('Claude Code 데스크톱 전환은 Windows와 macOS에서 지원합니다.');
+  const executable = await resolveCliExecutable('claude', { configuredPath });
+  if (!executable) throw new Error('Claude CLI 실행 파일을 찾을 수 없습니다.');
+  await assertSubscription('claude', cwd, configuredPath);
+  const windowsShim = isWindowsShim(executable);
+  const program = windowsShim ? 'cmd.exe' : executable;
+  const args = windowsShim ? ['/d', '/c', `"${executable}" --resume ${sessionId}`] : ['--resume', sessionId];
+  await new Promise<void>((resolve, reject) => {
+    let terminal: pty.IPty;
+    try {
+      terminal = pty.spawn(program, args, {
+        name: 'xterm-256color', cols: 120, rows: 40, cwd,
+        env: subscriptionEnvironment(),
+      });
+    } catch (error) { reject(error); return; }
+    let sent = false;
+    let settled = false;
+    let output = '';
+    let sendTimer: ReturnType<typeof setTimeout> | undefined;
+    let completionTimer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(readyTimer);
+      if (sendTimer) clearTimeout(sendTimer);
+      if (completionTimer) clearTimeout(completionTimer);
+      try { terminal.kill(); } catch { /* The CLI may have already closed its terminal. */ }
+      if (error) reject(error);
+      else resolve();
+    };
+    const readyTimer = setTimeout(() => finish(new Error('Claude 대화 입력 화면이 열리지 않았습니다. CLI에서 이어 열기로 상태를 확인해 주세요.')), 45_000);
+    terminal.onData((chunk) => {
+      output = (output + chunk).slice(-8_000);
+      if (!sent && /quick safety check|yes, i trust this folder|trust this folder/iu.test(output.slice(-2_000))) {
+        finish(new Error('Claude CLI에서 프로젝트 폴더 신뢰 확인이 필요합니다. CLI에서 이어 열기로 폴더를 승인한 뒤 다시 시도해 주세요.'));
+        return;
+      }
+      if (sent || sendTimer || !(/[─━]{16,}>/u.test(output.slice(-2_000)) || /shift\+tab to cycle/iu.test(output.slice(-2_000)))) return;
+      sendTimer = setTimeout(() => {
+        if (settled) return;
+        sent = true;
+        clearTimeout(readyTimer);
+        terminal.write('/desktop\r');
+        completionTimer = setTimeout(() => finish(new Error('Claude Code 데스크톱 전환 확인 시간이 초과됐습니다. CLI 기록은 보존돼 있습니다.')), 45_000);
+      }, 400);
+    });
+    terminal.onExit(({ exitCode }) => finish(sent && exitCode === 0
+      ? undefined : new Error(sent
+        ? `Claude Code 데스크톱 전환이 완료되지 않았습니다 (종료 코드 ${exitCode}). CLI에서 이어 열기로 상태를 확인해 주세요.`
+        : 'Claude 대화가 명령 입력 전에 종료됐습니다. CLI에서 이어 열기로 상태를 확인해 주세요.')));
   });
 };
 

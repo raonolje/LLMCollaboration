@@ -1,6 +1,6 @@
 {
   "name": "llm-collaboration",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "private": true,
   "description": "구독형 CLI 기반 로컬 LLM 협업 앱",
   "main": "dist-electron/main/main.js",
@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "cross-spawn": "^7.0.6",
+    "node-pty": "^1.1.0",
     "qrcode": "^1.5.4",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
@@ -40,6 +41,8 @@
   },
   "build": {
     "appId": "me.raonolje.llmcollaboration",
+    "npmRebuild": false,
+    "asarUnpack": ["node_modules/node-pty/**/*"],
     "protocols": [
       {
         "name": "LLM Collaboration chat link",

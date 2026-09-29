@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron';
 import path from 'node:path';
 import type { CollaborationEvent, LaunchRequest, Provider } from '../shared/types';
 import { createService } from './services';
@@ -158,14 +158,7 @@ const registerHandlers = (): void => {
   ipcMain.handle('collab:readTranscript', (_event, projectPath, transcript) => service.readTranscript(projectPath, transcript));
   ipcMain.handle('collab:readSessionHistory', (_event, projectPath, sessionId) => service.readSessionHistory(projectPath, sessionId));
   ipcMain.handle('collab:openSession', (_event, projectPath, sessionId) => service.openSession(projectPath, sessionId));
-  ipcMain.handle('collab:handoffClaudeSession', async (_event, projectPath, sessionId) => {
-    const current = await service.openProject(projectPath);
-    const session = [...(current.project.sessions ?? []), ...current.tasks.flatMap((task) => task.sessions ?? [])]
-      .find((item) => item.sessionId === sessionId && item.hostId === current.localHostId && item.provider === 'claude');
-    if (!session) throw new Error('이 컴퓨터의 Claude CLI 대화 세션을 찾을 수 없습니다.');
-    await service.openSession(projectPath, sessionId);
-    clipboard.writeText('/desktop');
-  });
+  ipcMain.handle('collab:handoffClaudeSession', (_event, projectPath, sessionId) => service.handoffClaudeSession(projectPath, sessionId));
   ipcMain.handle('collab:openDesktopSession', async (_event, projectPath, sessionId, provider: Provider) => {
     if (provider !== 'codex' && provider !== 'claude') throw new Error('지원하지 않는 모델입니다.');
     const current = await service.openProject(projectPath);

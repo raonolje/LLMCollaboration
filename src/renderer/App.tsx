@@ -129,9 +129,9 @@ function PairingQR({ url, token }: { url: string; token: string }) {
 function SessionCard({ session, localHostId, onOpen, onOpenDesktop, onHandoff, onHistory }: { session: ExternalSession; localHostId: string; onOpen: (session: ExternalSession) => void; onOpenDesktop: (session: ExternalSession) => void; onHandoff: (session: ExternalSession) => void; onHistory: (session: ExternalSession) => void }) {
   const isLocal = session.hostId === localHostId;
   return <div className={'session-card ' + session.provider}>
-    <div className="session-card-head"><span className={'model-chip ' + session.provider}>{providerLabel(session.provider)}</span><span className="badge neutral">{sessionPurposeLabel[session.purpose]}</span>{!isLocal && <span className="badge warning">다른 앱 환경</span>}<span className="activity-time">{shortTime(session.updatedAt)}</span></div>
+    <div className="session-card-head"><span className={'model-chip ' + session.provider}>{providerLabel(session.provider)}</span><span className="badge neutral">{sessionPurposeLabel[session.purpose]}</span>{!isLocal && <span className="badge warning">다른 앱 환경</span>}{session.handedOffAt && <span className="badge success">데스크톱으로 이동됨</span>}<span className="activity-time">{shortTime(session.updatedAt)}</span></div>
     <div className="session-id" title={session.sessionId}>{session.sessionId}</div>
-    <div className="session-actions"><button className="button small" type="button" disabled={!isLocal} onClick={() => onOpen(session)}>{isLocal ? 'CLI에서 이어 열기 ↗' : '이 컴퓨터에서 열 수 없음'}</button>{session.provider === 'claude' && <button className="button small" type="button" disabled={!isLocal} onClick={() => onHandoff(session)} title="터미널에서 대화를 이어 열고 /desktop 명령을 클립보드에 복사합니다. 붙여넣고 Enter를 누르세요.">Claude Code로 넘기기 ↗</button>}<button className="button small" type="button" onClick={() => onHistory(session)}>저장된 대화 보기</button><button className="button small" type="button" disabled={!isLocal} onClick={() => onOpenDesktop(session)} title={session.provider === 'claude' ? '현재 CLI 기록을 Claude Code 데스크톱에 사본으로 가져옵니다. 이후 CLI와 데스크톱 대화는 자동 동기화되지 않습니다.' : undefined}>{session.provider === 'codex' ? 'Codex 앱에서 보기 ↗' : 'Claude Code에 사본 가져오기 ↗'}</button></div>
+    <div className="session-actions"><button className="button small" type="button" disabled={!isLocal || !!session.handedOffAt} onClick={() => onOpen(session)}>{isLocal ? 'CLI에서 이어 열기 ↗' : '이 컴퓨터에서 열 수 없음'}</button>{session.provider === 'claude' && <button className="button small" type="button" disabled={!isLocal || !!session.handedOffAt} onClick={() => onHandoff(session)} title="Claude 대화형 CLI에 /desktop 명령을 자동 입력해 데스크톱으로 이동합니다.">{session.handedOffAt ? '데스크톱 이동 완료' : 'Claude Code로 자동 이동 ↗'}</button>}<button className="button small" type="button" onClick={() => onHistory(session)}>저장된 대화 보기</button><button className="button small" type="button" disabled={!isLocal || !!session.handedOffAt} onClick={() => onOpenDesktop(session)} title={session.provider === 'claude' ? '현재 CLI 기록을 Claude Code 데스크톱에 사본으로 가져옵니다. 이후 CLI와 데스크톱 대화는 자동 동기화되지 않습니다.' : undefined}>{session.provider === 'codex' ? 'Codex 앱에서 보기 ↗' : 'Claude Code에 사본 가져오기 ↗'}</button></div>
   </div>;
 }
 
@@ -140,7 +140,8 @@ function SessionGroups({ sessions, localHostId, onOpen, onOpenDesktop, onHandoff
   return <div className="session-group-grid">{(['codex', 'claude'] as Provider[]).map((provider) => {
     const matching = sessions.filter((session) => session.provider === provider).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
     if (!matching.length) return null;
-    const primary = matching.find((session) => session.hostId === localHostId) ?? matching[0];
+    const primary = matching.find((session) => session.hostId === localHostId && !session.handedOffAt)
+      ?? matching.find((session) => session.hostId === localHostId) ?? matching[0];
     const older = matching.filter((session) => session !== primary);
     return <section className="session-group" key={provider} aria-label={`${providerLabel(provider)} 대화 세션`}><h3>{providerLabel(provider)} 대화 <span className="badge neutral">{matching.length}개 기록</span></h3>{card(primary)}{older.length > 0 && <details className="session-older"><summary>이전 대화 {older.length}개 보기</summary><div className="session-grid">{older.map(card)}</div></details>}</section>;
   })}</div>;
@@ -718,9 +719,10 @@ export default function App() {
   };
   const handoffClaudeSession = (session: ExternalSession): void => {
     if (!project) return;
-    void perform('Claude 대화를 넘길 준비 중', async () => {
+    void perform('Claude Code 데스크톱으로 이동 중', async () => {
       await window.collab.handoffClaudeSession(project.path, session.sessionId);
-      notify('터미널에서 Claude가 열리면 Ctrl+V로 /desktop을 붙여넣고 Enter를 누르세요.');
+      await refresh(project.path);
+      notify('Claude 대화를 데스크톱으로 이동했습니다. 이후 앱의 CLI 작업은 새 대화로 이어집니다.');
     });
   };
 

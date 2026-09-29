@@ -25,7 +25,7 @@ import type {
   TaskInput,
   TaskStatus,
 } from '../../shared/types';
-import { assertSubscription, cliStatus, openCliSession, runCli, type CliRequest, type CliResult } from './cli';
+import { assertSubscription, cliStatus, handoffClaudeToDesktop, openCliSession, runCli, type CliRequest, type CliResult } from './cli';
 import { debatePrompt, executionPrompt, projectChatGuidance, reviewPrompt, taskCard } from './prompts';
 import {
   appendEvent,
@@ -48,12 +48,13 @@ import {
 import { conversationContext, importConversationFile, listLocalConversations, readImportedRaw, readImportedTurns } from './conversation-import';
 import { discoverModelCatalog } from './model-catalog';
 
-export type Service = Omit<CollaborationAPI, 'chooseDirectory' | 'chooseCliExecutable' | 'chooseConversationFile' | 'chooseChatFiles' | 'onEvent' | 'openDesktopSession' | 'handoffClaudeSession' | 'consumeLaunchRequest' | 'onLaunchRequest' | 'installChatSkills' | 'checkAppUpdate' | 'downloadAppUpdate' | 'remoteStatus' | 'setRemoteEnabled' | 'rotateRemoteToken'> & { listProjects: () => Promise<Project[]> };
+export type Service = Omit<CollaborationAPI, 'chooseDirectory' | 'chooseCliExecutable' | 'chooseConversationFile' | 'chooseChatFiles' | 'onEvent' | 'openDesktopSession' | 'consumeLaunchRequest' | 'onLaunchRequest' | 'installChatSkills' | 'checkAppUpdate' | 'downloadAppUpdate' | 'remoteStatus' | 'setRemoteEnabled' | 'rotateRemoteToken'> & { listProjects: () => Promise<Project[]> };
 
 export type ServiceOptions = Readonly<{
   registryPath: string;
   emit: (event: CollaborationEvent) => void;
   runModel?: typeof runCli;
+  handoffClaude?: typeof handoffClaudeToDesktop;
   autoStartSessions?: boolean;
   trashItem?: (target: string) => Promise<void>;
 }>;
@@ -248,7 +249,7 @@ const readInvocationPrompt = async (filename: string): Promise<string> => {
   }
 };
 
-export const createService = ({ registryPath, emit, runModel = runCli, autoStartSessions = true,
+export const createService = ({ registryPath, emit, runModel = runCli, handoffClaude = handoffClaudeToDesktop, autoStartSessions = true,
   trashItem = async () => { throw new Error('휴지통 기능을 사용할 수 없습니다.'); } }: ServiceOptions): Service => {
   const cliSettingsPath = path.join(path.dirname(registryPath), 'cli-settings.json');
   const hostIdPromise = (async (): Promise<string> => {
@@ -422,7 +423,7 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
       ? current.tasks.find((task) => task.id === taskId)?.sessions ?? []
       : current.project.sessions ?? [];
     const previous = sessions.filter((session) =>
-      session.hostId === hostId && session.provider === request.choice.provider && session.purpose === purpose,
+      session.hostId === hostId && session.provider === request.choice.provider && session.purpose === purpose && !session.handedOffAt,
     ).at(-1);
     const configuredPath = await cliPathFor(request.choice.provider);
     let restarted = false;
@@ -1209,6 +1210,24 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
       const cwd = await stat(session.cwd).then((value) => value.isDirectory() ? session.cwd : resolved).catch(() => resolved);
       await openCliSession(session.provider, session.sessionId, cwd, await cliPathFor(session.provider));
     },
+
+    handoffClaudeSession: async (projectPath: string, sessionId: string): Promise<void> => withLock(`claude-handoff:${path.resolve(projectPath)}:${sessionId}`, async () => {
+      const resolved = path.resolve(projectPath);
+      const current = await snapshot(resolved);
+      const projectSession = current.project.sessions?.find((item) => item.sessionId === sessionId && item.hostId === current.localHostId && item.provider === 'claude');
+      const task = current.tasks.find((item) => item.sessions?.some((session) => session.sessionId === sessionId && session.hostId === current.localHostId && session.provider === 'claude'));
+      const session = projectSession ?? task?.sessions?.find((item) => item.sessionId === sessionId);
+      if (!session) throw new Error('이 컴퓨터의 Claude CLI 대화를 찾을 수 없습니다.');
+      if (session.handedOffAt) throw new Error('이미 Claude Code 데스크톱으로 이동한 대화입니다.');
+      if ([...active.keys()].some((runKey) => runKey.startsWith(`${resolved}::`))) throw new Error('실행 중인 응답이나 업무가 끝난 뒤 대화를 이동해 주세요.');
+      const cwd = await stat(session.cwd).then((value) => value.isDirectory() ? session.cwd : resolved).catch(() => resolved);
+      await handoffClaude(sessionId, cwd, await cliPathFor('claude'));
+      const handedOffAt = now();
+      if (task) await replaceTask(resolved, task.id, (value) => ({ ...value, sessions: value.sessions?.map((item) => item.sessionId === sessionId && item.hostId === current.localHostId ? { ...item, handedOffAt } : item) }));
+      else await replaceProject(resolved, (value) => ({ ...value, sessions: value.sessions?.map((item) => item.sessionId === sessionId && item.hostId === current.localHostId ? { ...item, handedOffAt } : item), updatedAt: handedOffAt }));
+      await event(resolved, current.project.id, 'status', 'system', `Claude CLI 대화 ${sessionId}를 Claude Code 데스크톱으로 이동했습니다. 이후 앱의 CLI 작업은 새 대화에서 이어집니다.`, task?.id, undefined,
+        { sessionId, handedOffAt });
+    }),
   };
   return service;
 };

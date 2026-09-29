@@ -97,7 +97,7 @@ Apple 개발자 계정과 Expo EAS 계정을 연결한 뒤에는 `mobile/eas.jso
 
 이 대화는 앱이 `codex exec`와 `claude -p`로 만든 **외부 CLI 세션**입니다. Codex와 Claude Code 데스크톱의 사이드바에 자동 등록되지는 않습니다. Claude Code 앱으로 가져온 대화는 그 시점의 CLI 기록을 바탕으로 한 별도 데스크톱 세션입니다. Claude Code 앱의 연결이 끊기거나 가져온 대화가 표시되지 않아도, 이 앱의 **저장된 대화 보기**와 프로젝트 JSONL 파일에서 원본 기록을 읽을 수 있습니다. 이후 이 앱이 원래 CLI 세션에서 진행한 내용은 가져온 데스크톱 세션과 자동 동기화되지 않을 수 있습니다. 원래 세션을 그대로 이어가려면 **CLI에서 이어 열기**를 사용하세요. [Claude Code 데스크톱과 CLI](https://code.claude.com/docs/en/desktop), [세션 링크 동작](https://github.com/anthropics/claude-code/issues/80773)
 
-**Claude Code로 넘기기**는 해당 CLI 대화를 터미널에서 이어 열고 `/desktop`을 클립보드에 복사합니다. 터미널이 준비되면 붙여넣고 Enter를 누르세요. 공식 `/desktop` 명령은 그 시점의 CLI 세션을 데스크톱으로 이동시키고 CLI를 종료합니다. 이후 협업 앱의 자동 CLI 호출이 데스크톱 대화에 양방향 동기화되지는 않습니다. [Claude Code 데스크톱 공식 안내](https://code.claude.com/docs/en/desktop)
+**Claude Code로 자동 이동**은 해당 세션을 대화형 Claude CLI의 가상 터미널에서 이어 열고 `/desktop` 명령을 자동 입력합니다. CLI가 정상 종료된 경우에만 데스크톱 이동 완료로 표시하며, 준비 화면이나 전환 확인에 실패하면 기존 기록을 보존하고 오류를 보여 줍니다. 공식 `/desktop` 명령은 그 시점의 CLI 세션을 데스크톱으로 이동시키고 CLI를 종료합니다. 이후 협업 앱의 자동 CLI 호출은 새 대화에서 이어지며 데스크톱 대화와 양방향 동기화되지는 않습니다. [Claude Code 데스크톱 공식 안내](https://code.claude.com/docs/en/desktop)
 
 세션 ID와 이 앱의 실행 원문은 프로젝트 Git 기록에 저장됩니다. 앱은 Electron 사용자 데이터 폴더에 이 컴퓨터만의 `session-host-id`를 만들고, 세션마다 그 값을 함께 기록합니다. 프로젝트를 다른 컴퓨터에 클론하면 이전 기기 세션의 ID는 이력으로 남지만, 앱은 현재 기기의 세션만 이어 사용하고 누락된 프로젝트 세션은 새로 시작합니다. 다른 기기의 세션 카드는 표시되지만 열기 버튼이 비활성화됩니다. 반면 Codex·Claude가 자체적으로 보관하는 **재개 가능한 로컬 세션 데이터는 Git 산출물이 아닙니다.** 이전 컴퓨터의 CLI 대화를 새 컴퓨터에서 같은 ID로 재개할 수 있다고 가정하지 마세요.
 
