@@ -3,9 +3,12 @@ import type {
   AssignmentMode,
   Bootstrap,
   CollaborationEvent,
+  ConversationCandidate,
+  ConversationTurn,
   ExternalSession,
   EventType,
   ModelChoice,
+  ImportedConversation,
   Project,
   ProjectInput,
   ProjectSnapshot,
@@ -19,7 +22,7 @@ import appIcon from '../../assets/icon.svg?url';
 import './styles.css';
 
 type Tab = 'overview' | 'tasks' | 'debate' | 'history';
-type Dialog = 'project' | 'task' | 'delete-project' | 'transcript' | 'session-history' | null;
+type Dialog = 'project' | 'task' | 'delete-project' | 'import-conversation' | 'imported-history' | 'transcript' | 'session-history' | null;
 
 const statusLabel: Record<TaskStatus, string> = {
   draft: '초안',
@@ -116,6 +119,11 @@ export default function App() {
   const [searchResults, setSearchResults] = useState<CollaborationEvent[] | null>(null);
   const [transcriptView, setTranscriptView] = useState<{ path: string; content: string } | null>(null);
   const [sessionHistory, setSessionHistory] = useState<{ session: ExternalSession; turns: SessionTurn[] } | null>(null);
+  const [localConversations, setLocalConversations] = useState<ConversationCandidate[]>([]);
+  const [selectedConversation, setSelectedConversation] = useState<ConversationCandidate | null>(null);
+  const [manualConversationPath, setManualConversationPath] = useState('');
+  const [manualConversationProvider, setManualConversationProvider] = useState<Provider>('codex');
+  const [importedHistory, setImportedHistory] = useState<{ conversation: ImportedConversation; turns: ConversationTurn[] } | null>(null);
   const [planRequest, setPlanRequest] = useState('');
   const [runningTaskIds, setRunningTaskIds] = useState<ReadonlySet<string>>(() => new Set());
   const [cancelBusy, setCancelBusy] = useState(false);
@@ -275,8 +283,65 @@ export default function App() {
       reviewer: task.reviewer,
       dependsOn: task.dependsOn,
       debateRounds: task.debateRounds,
+      sourceConversationIds: task.sourceConversationIds ?? [],
     } : emptyTask(project?.defaultDebateRounds ?? 2));
     setCriteriaDraft(task?.acceptanceCriteria.join('\n') ?? '');
+    setDialog('task');
+  };
+
+  const openImportDialog = (): void => {
+    setSelectedConversation(null);
+    setManualConversationPath('');
+    setDialog('import-conversation');
+    void perform('로컬 대화를 찾는 중', async () => {
+      setLocalConversations(await window.collab.listLocalConversations());
+    });
+  };
+
+  const chooseConversationFile = (): void => {
+    void perform('대화 파일 선택 중', async () => {
+      const filePath = await window.collab.chooseConversationFile();
+      if (filePath) { setManualConversationPath(filePath); setSelectedConversation(null); }
+    });
+  };
+
+  const importSelectedConversation = (): void => {
+    if (!project) return;
+    const selected = selectedConversation;
+    const filePath = selected?.filePath ?? manualConversationPath;
+    if (!filePath) return;
+    void perform('대화를 가져오는 중', async () => {
+      applySnapshot(await window.collab.importConversation(project.path, selected?.provider ?? manualConversationProvider, filePath));
+      setDialog(null);
+      notify('대화 원문을 프로젝트 Git에 저장했습니다. 이 대화를 선택해 협업 업무를 만들 수 있습니다.');
+    });
+  };
+
+  const viewImportedConversation = (conversation: ImportedConversation): void => {
+    if (!project) return;
+    void perform('가져온 대화를 읽는 중', async () => {
+      setImportedHistory({ conversation, turns: await window.collab.readImportedConversation(project.path, conversation.id) });
+      setDialog('imported-history');
+    });
+  };
+
+  const viewImportedRaw = (conversation: ImportedConversation): void => {
+    if (!project) return;
+    void perform('대화 원문을 읽는 중', async () => {
+      const content = await window.collab.readImportedConversationRaw(project.path, conversation.id);
+      setTranscriptView({ path: `.llm-collaboration/imports/${conversation.id}.jsonl`, content });
+      setDialog('transcript');
+    });
+  };
+
+  const createTaskFromConversation = (conversation: ImportedConversation): void => {
+    setEditingTask(null);
+    setTaskDraft({ ...emptyTask(project?.defaultDebateRounds ?? 2),
+      title: `${conversation.title.slice(0, 65)} 협업`,
+      description: '가져온 대화를 검토하고 남은 문제를 해결하세요. 대화의 기존 결정과 맥락을 확인한 뒤 필요한 작업을 수행하세요.',
+      sourceConversationIds: [conversation.id],
+    });
+    setCriteriaDraft('가져온 대화의 요구사항과 현재 상태를 확인한다\n두 모델의 토론을 거쳐 합의된 작업을 구현하고 교차 검수한다');
     setDialog('task');
   };
 
@@ -472,6 +537,11 @@ export default function App() {
         {project?.sessions?.length ? <div className="session-grid">{project.sessions.map((session) => <SessionCard key={`${session.hostId}:${session.sessionId}`} session={session} localHostId={snapshot?.localHostId ?? ''} onOpen={openSession} onOpenDesktop={openDesktopSession} onHistory={viewSessionHistory} />)}</div>
           : <div className="session-empty">CLI 채팅이 아직 없습니다. CLI 로그인 상태와 전체 이력의 오류를 확인한 뒤 새로고침해 다시 시도하세요.</div>}
       </div>
+      <div className="panel panel-pad">
+        <div className="panel-head"><div><h2>가져온 모델 대화</h2><p className="subtle">이 컴퓨터의 Codex·Claude 대화를 프로젝트에 복사하고 협업 업무의 맥락으로 연결합니다.</p></div><button className="button primary small" disabled={!!busy} onClick={openImportDialog}>＋ 대화 가져오기</button></div>
+        {project?.importedConversations?.length ? <div className="imported-list">{project.importedConversations.map((conversation) => <div className="imported-item" key={conversation.id}><div><span className={'model-chip ' + conversation.provider}>{providerLabel(conversation.provider)}</span><strong>{conversation.title}</strong><p className="subtle">{conversation.turnCount}개 발화 · {shortTime(conversation.updatedAt)} · 프로젝트 Git에 보관</p></div><div className="session-actions"><button className="button small" onClick={() => viewImportedConversation(conversation)}>대화 보기</button><button className="button primary small" onClick={() => createTaskFromConversation(conversation)}>이 대화로 업무 만들기</button></div></div>)}</div>
+          : <div className="session-empty">가져온 대화가 없습니다. 로컬 대화 목록 또는 JSONL 파일에서 선택하세요.</div>}
+      </div>
       <div className="grid two">
         <div className="panel panel-pad">
           <div className="panel-head"><div><h2>프로젝트 헌장</h2><p className="subtle">목표와 완료 기준을 모든 실행에 다시 전달합니다.</p></div></div>
@@ -532,6 +602,7 @@ export default function App() {
                 <span>토론 {task.debateRounds}회</span>
                 <span>완료 기준 {task.acceptanceCriteria.length}개</span>
                 {task.dependsOn.length > 0 && <span>선행 업무 {task.dependsOn.length}개</span>}
+                {!!task.sourceConversationIds?.length && <span>참고 대화 {task.sourceConversationIds.length}개</span>}
               </div>
               <div className="model-pair" style={{ marginTop: 9 }}><ModelChip choice={task.executor} /><span>실행 → 검수</span><ModelChip choice={task.reviewer} /></div>
               {!!task.sessions?.length && <details className="task-sessions"><summary>별도 CLI 채팅 {task.sessions.length}개</summary><div className="session-grid">{task.sessions.map((session) => <SessionCard key={`${session.hostId}:${session.sessionId}`} session={session} localHostId={snapshot?.localHostId ?? ''} onOpen={openSession} onOpenDesktop={openDesktopSession} onHistory={viewSessionHistory} />)}</div></details>}
@@ -587,13 +658,13 @@ export default function App() {
 
   const renderHistory = () => (
     <div className="section-stack">
-      <div className="toolbar"><div><h2>전체 이력</h2><p className="subtle">논쟁·작업·검수 원문을 검색합니다. 기록은 프로젝트 폴더에도 보존됩니다.</p></div><span className="badge neutral">원문 {events.length}개</span></div>
+      <div className="toolbar"><div><h2>전체 이력</h2><p className="subtle">논쟁·작업·검수와 가져온 대화를 검색합니다. 기록은 프로젝트 폴더에도 보존됩니다.</p></div><span className="badge neutral">원문 {events.length}개</span></div>
       <form onSubmit={searchHistory} className="search-box"><input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="내용, 모델, 업무 기록 검색" aria-label="이력 검색어" /><button className="button primary" type="submit" disabled={!!busy}>검색</button>{searchResults && <button className="button" type="button" onClick={() => { setSearchResults(null); setSearchQuery(''); }}>초기화</button>}</form>
       <div className="panel panel-pad">
         {searchResults && <p className="subtle" style={{ marginBottom: 10 }}>검색 결과 {searchResults.length}개</p>}
         {searchDisplay.length ? searchDisplay.map((event) => (
           <div className="search-result" key={event.id}>
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}><span className="badge">{eventLabel[event.type]}</span><strong style={{ fontSize: 12 }}>{actorLabel(event.actor)}</strong><span className="activity-time">{shortTime(event.timestamp)}</span>{event.taskId && <span className="subtle">업무: {tasks.find((task) => task.id === event.taskId)?.title ?? event.taskId}</span>}{event.round !== undefined && <span className="subtle">{event.round}차</span>}{event.metadata?.transcript && <button className="button ghost small" onClick={() => openTranscript(event)}>CLI 원문 열기</button>}</div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}><span className="badge">{event.metadata?.source === 'imported' ? '가져온 대화' : eventLabel[event.type]}</span><strong style={{ fontSize: 12 }}>{actorLabel(event.actor)}</strong><span className="activity-time">{shortTime(event.timestamp)}</span>{event.taskId && <span className="subtle">업무: {tasks.find((task) => task.id === event.taskId)?.title ?? event.taskId}</span>}{event.round !== undefined && <span className="subtle">{event.round}차</span>}{event.metadata?.transcript && <button className="button ghost small" onClick={() => openTranscript(event)}>CLI 원문 열기</button>}{typeof event.metadata?.conversationId === 'string' && <button className="button ghost small" onClick={() => { const conversation = project?.importedConversations?.find((item) => item.id === event.metadata?.conversationId); if (conversation) viewImportedConversation(conversation); }}>대화 보기</button>}</div>
             <p>{event.message}</p>
           </div>
         )) : <Empty icon="⌕" title={searchResults ? '검색 결과가 없습니다' : '저장된 이력이 없습니다'} detail={searchResults ? '다른 검색어로 다시 찾아보세요.' : '모델과 주고받은 내용이 실행 시마다 이곳에 기록됩니다.'} />}
@@ -644,10 +715,13 @@ export default function App() {
       <div className="form-actions"><button className="button" type="button" onClick={() => setDialog(null)}>취소</button><button className="button primary" type="submit" disabled={!!busy}>프로젝트 만들기</button></div>
     </form></div></div>}
     {dialog === 'delete-project' && project && <div className="modal-backdrop"><div className="modal" role="dialog" aria-modal="true" aria-label="프로젝트 삭제 확인"><div className="modal-header"><div><h2>프로젝트 삭제</h2><p className="subtle">프로젝트 폴더와 앱이 만든 작업용 폴더를 휴지통으로 이동합니다.</p></div><button className="close" aria-label="닫기" disabled={!!busy} onClick={() => setDialog(null)}>×</button></div><div className="modal-body form-stack"><div className="note"><strong>삭제할 프로젝트</strong><br />{project.name}</div><div className="folder-line">{project.path}</div><div className="field"><label htmlFor="delete-project-name">확인하려면 프로젝트 이름을 그대로 입력하세요</label><input id="delete-project-name" autoComplete="off" value={deleteConfirmation} onChange={(event) => setDeleteConfirmation(event.target.value)} placeholder={project.name} /></div><div className="form-actions"><button className="button" type="button" disabled={!!busy} onClick={() => setDialog(null)}>취소</button><button className="button danger" type="button" disabled={!!busy || deleteConfirmation !== project.name || runningTaskIds.size > 0} onClick={deleteCurrentProject}>폴더와 프로젝트 삭제</button></div></div></div></div>}
+    {dialog === 'import-conversation' && project && <div className="modal-backdrop"><div className="modal import-modal" role="dialog" aria-modal="true" aria-label="기존 대화 가져오기"><div className="modal-header"><div><h2>Codex·Claude 대화 가져오기</h2><p className="subtle">로컬 대화를 골라 현재 프로젝트에 사본을 저장합니다.</p></div><button className="close" aria-label="닫기" disabled={!!busy} onClick={() => setDialog(null)}>×</button></div><div className="modal-body form-stack"><div className="import-candidates">{localConversations.length ? localConversations.map((candidate) => <button type="button" key={candidate.filePath} className={'import-candidate ' + (selectedConversation?.filePath === candidate.filePath ? 'selected' : '')} onClick={() => { setSelectedConversation(candidate); setManualConversationPath(''); }}><span className={'model-chip ' + candidate.provider}>{providerLabel(candidate.provider)}</span><strong>{candidate.title}</strong><small>{candidate.turnCount}개 발화 · {shortTime(candidate.updatedAt)}</small></button>) : <div className="session-empty">{busy ? '대화를 찾고 있습니다…' : '자동으로 찾은 대화가 없습니다. JSONL 파일을 직접 선택할 수 있습니다.'}</div>}</div><div className="field"><label>직접 JSONL 파일 선택</label><div className="search-box"><input value={manualConversationPath} onChange={(event) => { setManualConversationPath(event.target.value); setSelectedConversation(null); }} placeholder="Codex 또는 Claude 대화 파일 경로" /><button className="button" type="button" onClick={chooseConversationFile}>파일 선택</button></div><select aria-label="직접 선택한 대화의 모델" value={manualConversationProvider} onChange={(event) => setManualConversationProvider(event.target.value as Provider)}><option value="codex">Codex</option><option value="claude">Claude</option></select></div><p className="subtle">선택한 시점의 대화 원문을 프로젝트 Git에 복사합니다. 이후 원래 채팅과 자동 동기화되지는 않습니다.</p><div className="form-actions"><button className="button" type="button" disabled={!!busy} onClick={() => setDialog(null)}>취소</button><button className="button primary" type="button" disabled={!!busy || !(selectedConversation || manualConversationPath)} onClick={importSelectedConversation}>대화 가져오기</button></div></div></div></div>}
+    {dialog === 'imported-history' && importedHistory && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setDialog(null)}><div className="modal session-history-modal" role="dialog" aria-modal="true" aria-label="가져온 모델 대화"><div className="modal-header"><div><h2>{providerLabel(importedHistory.conversation.provider)}에서 가져온 대화</h2><p className="subtle">{importedHistory.conversation.title}</p></div><button className="close" aria-label="닫기" onClick={() => setDialog(null)}>×</button></div><div className="modal-body"><div className="session-turn-head"><p className="subtle session-history-note">{importedHistory.turns.length}개 발화 · 프로젝트 Git에 원문 JSONL이 저장되어 있습니다.</p><button className="button small" type="button" onClick={() => viewImportedRaw(importedHistory.conversation)}>원본 JSONL 보기</button></div>{importedHistory.turns.map((turn, index) => <article className="session-turn" key={index}><div className="session-turn-head"><span className="badge neutral">{turn.role === 'user' ? '사용자' : providerLabel(importedHistory.conversation.provider)}</span>{turn.timestamp && <span className="activity-time">{shortTime(turn.timestamp)}</span>}</div><div className="session-response">{turn.text}</div></article>)}</div></div></div>}
     {dialog === 'task' && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setDialog(null)}><div className="modal" role="dialog" aria-modal="true" aria-label={editingTask ? '업무 편집' : '업무 만들기'}><div className="modal-header"><div><h2>{editingTask ? '업무 편집' : '새 업무'}</h2><p className="subtle">완료 기준과 모델별 역할을 명확히 지정합니다.</p></div><button className="close" aria-label="닫기" onClick={() => setDialog(null)}>×</button></div><form className="modal-body form-stack" onSubmit={submitTask}>
       <div className="field"><label htmlFor="task-title">업무 제목</label><input id="task-title" required value={taskDraft.title} onChange={(event) => setTaskDraft((previous) => ({ ...previous, title: event.target.value }))} placeholder="예: 로그인 화면 구현" /></div>
       <div className="field"><label htmlFor="task-description">구체적인 지시</label><textarea id="task-description" required value={taskDraft.description} onChange={(event) => setTaskDraft((previous) => ({ ...previous, description: event.target.value }))} placeholder="필요한 기능, 범위, 제약을 적어 주세요." /></div>
       <div className="field"><label htmlFor="task-criteria">완료 기준</label><textarea id="task-criteria" value={criteriaDraft} onChange={(event) => setCriteriaDraft(event.target.value)} placeholder={'한 줄에 하나씩 입력\n예: 모든 입력 검증이 동작한다\n예: 테스트가 통과한다'} /><span>검수 모델이 각 항목을 확인합니다.</span></div>
+      {!!project?.importedConversations?.length && <div className="field"><label>참고할 기존 대화 (최대 3개)</label><div className="dependency-list">{project.importedConversations.map((conversation) => <label className="dependency-item" key={conversation.id}><input type="checkbox" checked={taskDraft.sourceConversationIds?.includes(conversation.id) ?? false} onChange={(event) => setTaskDraft((previous) => ({ ...previous, sourceConversationIds: event.target.checked ? [...previous.sourceConversationIds ?? [], conversation.id] : (previous.sourceConversationIds ?? []).filter((id) => id !== conversation.id) }))} /><span>{providerLabel(conversation.provider)} · {conversation.title}</span></label>)}</div><span>선택한 대화의 시작과 최근 내용을 토론·실행·검수 요청마다 전달합니다. 전체 원문은 프로젝트 Git에 보관합니다.</span></div>}
       <div className="form-grid"><div className="field"><label htmlFor="assignment-mode">업무 분장</label><select id="assignment-mode" value={taskDraft.mode} onChange={(event) => setTaskDraft((previous) => ({ ...previous, mode: event.target.value as AssignmentMode }))}><option value="manual">직접 지정</option><option value="automatic">자동 배정</option></select></div><div className="field"><label htmlFor="task-rounds">토론 왕복 횟수</label><input id="task-rounds" type="number" min={1} max={8} value={taskDraft.debateRounds} onChange={(event) => setTaskDraft((previous) => ({ ...previous, debateRounds: Number(event.target.value) }))} /></div></div>
       <div className="form-grid"><div className="field"><label htmlFor="executor-provider">실행 모델</label><select id="executor-provider" value={taskDraft.executor.provider} onChange={(event) => changeModel('executor', 'provider', event.target.value)}><option value="codex">Codex</option><option value="claude">Claude</option></select><input aria-label="실행 세부 모델" value={taskDraft.executor.model} onChange={(event) => changeModel('executor', 'model', event.target.value)} placeholder="세부 모델 (비우면 CLI 기본값)" /></div><div className="field"><label htmlFor="reviewer-provider">검수 모델</label><select id="reviewer-provider" value={taskDraft.reviewer.provider} onChange={(event) => changeModel('reviewer', 'provider', event.target.value)}><option value="claude">Claude</option><option value="codex">Codex</option></select><input aria-label="검수 세부 모델" value={taskDraft.reviewer.model} onChange={(event) => changeModel('reviewer', 'model', event.target.value)} placeholder="세부 모델 (비우면 CLI 기본값)" /></div></div>
       {taskDraft.mode === 'automatic' && <div className="note">저장 후 앱이 업무 성격에 따라 실행·검수 모델을 배정합니다. 배정 결과는 다시 편집할 수 있습니다.</div>}

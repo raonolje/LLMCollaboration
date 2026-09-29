@@ -20,6 +20,24 @@ export type SessionTurn = Readonly<{
   prompt: string;
 }>;
 
+export type ConversationTurn = Readonly<{ role: 'user' | 'assistant'; text: string; timestamp?: string }>;
+export type ConversationCandidate = Readonly<{
+  provider: Provider;
+  filePath: string;
+  title: string;
+  updatedAt: string;
+  turnCount: number;
+}>;
+export type ImportedConversation = Readonly<{
+  id: string;
+  provider: Provider;
+  sessionId: string;
+  title: string;
+  importedAt: string;
+  updatedAt: string;
+  turnCount: number;
+}>;
+
 export type TaskStatus =
   | 'draft'
   | 'debating'
@@ -41,6 +59,8 @@ export type TaskInput = Readonly<{
   reviewer: ModelChoice;
   dependsOn: string[];
   debateRounds: number;
+  sourceConversationIds?: string[];
+  sourceContext?: string;
 }>;
 
 export type Task = TaskInput & Readonly<{
@@ -65,6 +85,7 @@ export type Project = Readonly<{
   createdAt: string;
   updatedAt: string;
   sessions?: ExternalSession[];
+  importedConversations?: ImportedConversation[];
 }>;
 
 export type ProjectInput = Readonly<{
@@ -133,6 +154,11 @@ export type CollaborationAPI = Readonly<{
   setCliExecutable: (provider: Provider, filePath: string | null) => Promise<CliStatus[]>;
   refreshCliStatus: () => Promise<CliStatus[]>;
   createProject: (input: ProjectInput) => Promise<ProjectSnapshot>;
+  listLocalConversations: () => Promise<ConversationCandidate[]>;
+  importConversation: (projectPath: string, provider: Provider, filePath: string) => Promise<ProjectSnapshot>;
+  readImportedConversation: (projectPath: string, conversationId: string) => Promise<ConversationTurn[]>;
+  readImportedConversationRaw: (projectPath: string, conversationId: string) => Promise<string>;
+  chooseConversationFile: () => Promise<string | null>;
   deleteProject: (projectPath: string, projectId: string, confirmation: string) => Promise<void>;
   openProject: (projectPath: string) => Promise<ProjectSnapshot>;
   updateCharter: (projectPath: string, charter: string) => Promise<ProjectSnapshot>;

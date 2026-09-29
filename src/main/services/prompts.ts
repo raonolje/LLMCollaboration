@@ -28,6 +28,8 @@ export const taskCard = (project: Project, task: Task, events: readonly Collabor
     `현재 상태: ${task.status}`,
     `토론 요약: ${compact(task.debateSummary || '아직 없음', 3000)}`,
     `검수 요약: ${compact(task.reviewSummary || '아직 없음', 2000)}`,
+    '## 가져온 대화의 작업 맥락',
+    compact(task.sourceContext || '연결된 대화 없음', 28_000),
     '## 이 업무의 최근 원문 기록',
     compact(relevant || '기록 없음', 10_000),
     '위 프로젝트 기준과 업무 카드는 매 요청마다 다시 전달됩니다. 최근 기록은 맥락이며, 원문 전체는 프로젝트 기록에 보존됩니다.',

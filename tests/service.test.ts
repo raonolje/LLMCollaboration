@@ -369,3 +369,30 @@ describe('project deletion', () => {
     expect((await service.bootstrap()).projects).toHaveLength(1);
   }), 30_000);
 });
+
+describe('conversation import', () => {
+  it('archives a prior chat and carries it into a new collaboration task', () => withTemporaryWorkspace(async (workspace) => {
+    const projectPath = path.join(workspace, 'project');
+    const source = path.join(workspace, 'prior-codex-chat.jsonl');
+    const raw = [
+      { type: 'session_meta', payload: { session_id: 'prior-session' } },
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Continue the search feature from our prior chat' }] } },
+      { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'The search index still needs tests' }] } },
+    ].map(JSON.stringify).join('\n');
+    await writeFile(source, raw, 'utf8');
+    const service = createService({ registryPath: path.join(workspace, 'registry.json'), emit: () => undefined, autoStartSessions: false });
+    await service.createProject({ path: projectPath, name: 'Imported chat project', goal: 'Finish existing work' });
+    const importedSnapshot = await service.importConversation(projectPath, 'codex', source);
+    const imported = importedSnapshot.project.importedConversations?.[0];
+    expect(imported?.sessionId).toBe('prior-session');
+    expect(await service.readImportedConversation(projectPath, imported!.id)).toHaveLength(2);
+    expect(await readFile(path.join(projectPath, '.llm-collaboration', 'imports', `${imported!.id}.jsonl`), 'utf8')).toBe(raw);
+    expect(await service.readImportedConversationRaw(projectPath, imported!.id)).toBe(raw);
+    const task = (await service.createTask(projectPath, taskInput({ sourceConversationIds: [imported!.id] }))).tasks[0];
+    expect(task.sourceContext).toContain('The search index still needs tests');
+    expect(task.sourceContext).toContain(`imports/${imported!.id}.jsonl`);
+    expect((await service.search(projectPath, 'index still needs tests')).some((result) => result.metadata?.conversationId === imported!.id)).toBe(true);
+    await expect(service.importConversation(projectPath, 'codex', source)).rejects.toThrow('이미 가져온');
+    await expect(service.createTask(projectPath, taskInput({ sourceConversationIds: ['invalid'] }))).rejects.toThrow('저장된 대화만');
+  }), 30_000);
+});

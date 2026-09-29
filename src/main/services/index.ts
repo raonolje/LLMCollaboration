@@ -41,8 +41,9 @@ import {
   taskChangedFiles,
   writeJson,
 } from './repository';
+import { conversationContext, importConversationFile, listLocalConversations, readImportedRaw, readImportedTurns } from './conversation-import';
 
-export type Service = Omit<CollaborationAPI, 'chooseDirectory' | 'chooseCliExecutable' | 'onEvent' | 'openDesktopSession'>;
+export type Service = Omit<CollaborationAPI, 'chooseDirectory' | 'chooseCliExecutable' | 'chooseConversationFile' | 'onEvent' | 'openDesktopSession'>;
 
 export type ServiceOptions = Readonly<{
   registryPath: string;
@@ -118,6 +119,7 @@ const validateTaskInput = (input: TaskInput, project: Project, tasks: readonly T
     reviewer: input.reviewer,
     dependsOn: [...new Set(input.dependsOn)],
     debateRounds: roundCount(input.debateRounds, project.defaultDebateRounds),
+    sourceConversationIds: input.sourceConversationIds ?? [],
   };
 };
 
@@ -355,6 +357,16 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
     return { project: current.project, task, events: current.events };
   };
 
+  const withConversationContext = async (projectPath: string, project: Project, input: TaskInput): Promise<TaskInput> => {
+    const ids = [...new Set(input.sourceConversationIds ?? [])];
+    if (ids.length > 3) throw new Error('업무에 연결할 대화는 최대 3개입니다.');
+    const sources = ids.map((id) => project.importedConversations?.find((conversation) => conversation.id === id));
+    if (sources.some((source) => !source)) throw new Error('프로젝트에 저장된 대화만 업무에 연결할 수 있습니다.');
+    const contexts = await Promise.all(sources.map(async (source) =>
+      conversationContext(source!, await readImportedTurns(projectPath, source!.id))));
+    return { ...input, sourceConversationIds: ids, sourceContext: contexts.join('\n\n---\n\n').slice(0, 42_000) };
+  };
+
   const begin = (projectPath: string, taskId: string): AbortController => {
     const runKey = key(projectPath, taskId);
     if (active.has(runKey)) throw new Error('이 업무는 이미 실행 중입니다.');
@@ -475,6 +487,7 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
   };
 
   const service: Service = {
+    listLocalConversations,
     bootstrap: async (): Promise<Bootstrap> => {
       const projectPaths = await readRegisteredPaths();
       const [projectResults, cliResults] = await Promise.all([
@@ -537,6 +550,40 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
       await event(projectPath, project.id, 'system', 'system', `프로젝트를 생성했습니다. 목표: ${project.goal}`);
       if (autoStartSessions) await startProjectSessions(projectPath);
       return snapshot(projectPath);
+    },
+
+    importConversation: async (projectPath: string, provider: Provider, filePath: string): Promise<ProjectSnapshot> => {
+      const resolved = path.resolve(projectPath);
+      const current = await readProject(resolved);
+      const imported = await importConversationFile(resolved, provider, filePath);
+      if (current.importedConversations?.some((item) => item.id === imported.id)) {
+        throw new Error('이미 가져온 대화입니다.');
+      }
+      await replaceProject(resolved, (project) => ({ ...project,
+        importedConversations: [...project.importedConversations ?? [], imported], updatedAt: now(),
+      }));
+      await event(resolved, current.id, 'system', 'user',
+        `${provider === 'codex' ? 'Codex' : 'Claude'} 대화를 가져왔습니다: ${imported.title} (${imported.turnCount}개 발화)`,
+        undefined, undefined, { source: 'imported', conversationId: imported.id });
+      return snapshot(resolved);
+    },
+
+    readImportedConversation: async (projectPath: string, conversationId: string) => {
+      const resolved = path.resolve(projectPath);
+      const project = await readProject(resolved);
+      if (!project.importedConversations?.some((item) => item.id === conversationId)) {
+        throw new Error('프로젝트에 저장된 대화가 아닙니다.');
+      }
+      return readImportedTurns(resolved, conversationId);
+    },
+
+    readImportedConversationRaw: async (projectPath: string, conversationId: string) => {
+      const resolved = path.resolve(projectPath);
+      const project = await readProject(resolved);
+      if (!project.importedConversations?.some((item) => item.id === conversationId)) {
+        throw new Error('프로젝트에 저장된 대화가 아닙니다.');
+      }
+      return readImportedRaw(resolved, conversationId);
     },
 
     deleteProject: async (projectPath: string, projectId: string, confirmation: string): Promise<void> => {
@@ -606,7 +653,8 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
     createTask: async (projectPath: string, input: TaskInput): Promise<ProjectSnapshot> => {
       const resolved = path.resolve(projectPath);
       const current = await snapshot(resolved);
-      const validated = validateTaskInput(input, current.project, current.tasks);
+      const validated = await withConversationContext(resolved, current.project,
+        validateTaskInput(input, current.project, current.tasks));
       const choices = validated.mode === 'automatic' ? autoChoices(validated, current.tasks) : { executor: validated.executor, reviewer: validated.reviewer };
       const timestamp = now();
       const task: Task = { ...validated, ...choices, id: randomUUID(), status: 'draft', createdAt: timestamp, updatedAt: timestamp, artifacts: [] };
@@ -622,7 +670,8 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
       const current = await snapshot(resolved);
       const previous = current.tasks.find((task) => task.id === candidate.id);
       if (!previous) throw new Error(`업무를 찾을 수 없습니다: ${candidate.id}`);
-      const validated = validateTaskInput(candidate, current.project, current.tasks.filter((task) => task.id !== candidate.id));
+      const validated = await withConversationContext(resolved, current.project,
+        validateTaskInput(candidate, current.project, current.tasks.filter((task) => task.id !== candidate.id)));
       if (validated.dependsOn.includes(candidate.id)) throw new Error('업무가 자기 자신을 선행 업무로 지정할 수 없습니다.');
       const choices = validated.mode === 'automatic' ? autoChoices(validated, current.tasks.filter((task) => task.id !== candidate.id)) : { executor: validated.executor, reviewer: validated.reviewer };
       if (hasDependencyCycle(current.tasks.map((task) => task.id === candidate.id ? { id: task.id, dependsOn: validated.dependsOn } : task))) {
@@ -845,7 +894,17 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
         (previous, file) => previous.then(async (matches) => [...matches, ...await searchRun(resolved, project, file, terms)]),
         Promise.resolve([]),
       );
-      return [...events, ...raw].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+      const imported = (await Promise.all((project.importedConversations ?? []).map(async (conversation) =>
+        (await readImportedTurns(resolved, conversation.id)).flatMap((turn, index): CollaborationEvent[] => {
+          const searchable = `${conversation.title} ${turn.text} ${turn.role} ${conversation.provider}`.toLocaleLowerCase();
+          return terms.every((term) => searchable.includes(term)) ? [{
+            id: `import:${conversation.id}:${index}`, projectId: project.id, type: 'response',
+            actor: turn.role === 'user' ? 'user' : conversation.provider,
+            message: turn.text.slice(0, 1800), timestamp: turn.timestamp ?? conversation.updatedAt,
+            metadata: { source: 'imported', conversationId: conversation.id },
+          }] : [];
+        })))).flat();
+      return [...events, ...raw, ...imported].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
     },
 
     readTranscript: async (projectPath: string, transcript: string): Promise<string> => {

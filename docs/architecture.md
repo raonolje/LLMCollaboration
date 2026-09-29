@@ -27,6 +27,7 @@ flowchart LR
 | `src/main/services/prompts.ts` | 프로젝트 헌장, 업무 카드, 최근 기록으로 단계별 요청 문장 구성 |
 | `src/main/services/cli.ts` | 기기별 CLI 실행 파일 탐색, 구독 로그인 확인, CLI 프로세스 실행, 표준 출력·오류 저장 |
 | `src/main/services/repository.ts` | 프로젝트 파일, Git 커밋, 업무별 worktree 관리 |
+| `src/main/services/conversation-import.ts` | 로컬 Codex·Claude JSONL 검색, 발화 추출, 프로젝트 대화 사본 보관 |
 | `assets/`와 `scripts/build-icons.*` | SVG 원본, PNG·ICO·ICNS 패키지 아이콘과 생성 스크립트 |
 
 Renderer는 Node.js 파일 API에 직접 접근하지 않습니다. Electron의 `contextIsolation`이 켜져 있고 `nodeIntegration`은 꺼져 있습니다. 메인 프로세스가 파일과 외부 CLI를 다룹니다.
@@ -50,6 +51,8 @@ Renderer는 Node.js 파일 API에 직접 접근하지 않습니다. Electron의 
 `readSessionHistory`는 프로젝트·업무에 등록된 세션 ID를 확인하고, 해당 ID가 기록된 이벤트에 첫 JSONL 행의 요청 문장을 연결해 반환합니다. 원본 응답은 이벤트에, 전체 CLI 출력은 `runs/*.jsonl`에 있으므로 모델 앱과 연결이 끊겨도 이 앱에서 기록을 읽을 수 있습니다. 이 기록 열람은 다른 컴퓨터에서 복제한 프로젝트에도 적용됩니다. `openSession`은 등록된 **현재 기기** 세션만 허용하고, Windows에서는 명령 프롬프트, macOS에서는 Terminal을 열어 `codex resume --include-non-interactive <ID>` 또는 `claude --resume <ID>`를 실행합니다. 업무 worktree가 이미 정리돼 작업 폴더가 없으면 프로젝트 폴더에서 엽니다. 다른 기기의 세션 카드는 화면에 남지만 재개 버튼은 비활성화됩니다. 별도의 `openDesktopSession` IPC는 프로젝트에 기록된 현재 기기 세션과 제공자를 확인한 뒤 Codex에는 `codex://threads/<ID>`, Claude에는 `claude://resume?session=<ID>` 링크를 운영체제에 전달합니다. Codex `exec`와 Claude `-p` 대화는 데스크톱 앱 사이드바에 자동 등록되지 않습니다. Claude Code 데스크톱은 해당 CLI 대화를 가져와 별도 세션으로 이어갈 수 있지만, 이후 원본 CLI 대화와 내용이 자동 동기화된다고 가정하지 않습니다. [Codex CLI 명령](https://learn.chatgpt.com/docs/developer-commands), [Codex 앱 딥 링크](https://learn.chatgpt.com/docs/reference/commands), [Claude Code 데스크톱과 CLI](https://code.claude.com/docs/en/desktop), [Claude 세션 링크 동작](https://github.com/anthropics/claude-code/issues/80773)
 
 ## 토론과 업무 분장
+
+프로젝트의 `importedConversations`는 가져온 Codex·Claude 대화의 메타데이터를 보관합니다. 원본 JSONL과 추출한 사용자·모델 발화는 `.llm-collaboration/imports/<해시>.jsonl` 및 `.json`에 복사해 로컬 Git으로 추적합니다. 로컬 세션 목록은 사용자의 `.codex/sessions`, `.claude/projects`에서 최근 JSONL을 찾아 만듭니다. 가져온 대화를 연결한 업무는 시작과 최근 발화를 길이 제한이 있는 `sourceContext`로 업무 카드에 반복 포함합니다. 원본 전체는 프로젝트에 남고, 원래 채팅과의 양방향 동기화나 원래 세션 ID로의 자동 재개는 수행하지 않습니다.
 
 기본 토론은 양측의 독립 제안으로 시작합니다. 첫 회차에서는 서로의 제안에 반론을 제기하고, 두 번째 회차부터는 상대의 최신 반론과 답변에 답합니다. 설정한 회차가 끝나면 두 모델이 상대의 최종 답변을 평가합니다. 이어 검수 담당 모델이 두 평가와 기록을 바탕으로 합의된 결정, 남은 이견과 판단 근거, 실행 단계, 완료 기준과 검증 방법을 종합합니다. 이 종합 결과를 업무의 `debateSummary`와 결론 이벤트에 저장합니다. 사용자는 논쟁을 본 뒤 특정 모델 또는 양쪽에 추가 질문을 보내고 회차를 더 실행할 수 있습니다.
 

@@ -180,6 +180,16 @@ p { margin: 0; }
 .session-id { margin: 11px 0; color: #56637b; font: 11px ui-monospace, "Cascadia Code", Consolas, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-actions { display: flex; gap: 7px; flex-wrap: wrap; }
 .session-empty { padding: 16px; color: #8b98ab; font-size: 12px; border: 1px dashed #dce3ee; border-radius: 10px; }
+.imported-list { display: grid; gap: 10px; }
+.imported-item { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 13px; border: 1px solid #e4eaf2; border-radius: 10px; }
+.imported-item strong { margin-left: 9px; font-size: 12px; overflow-wrap: anywhere; }
+.imported-item p { margin-top: 8px; }
+.import-modal { width: min(100%, 760px); }
+.import-candidates { max-height: 36vh; overflow: auto; display: grid; gap: 7px; }
+.import-candidate { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 10px; width: 100%; text-align: left; border: 1px solid #e1e7f0; border-radius: 9px; background: #fff; padding: 10px; cursor: pointer; }
+.import-candidate.selected { border-color: #5268da; background: #f5f7ff; }
+.import-candidate strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.import-candidate small { grid-column: 2; color: #8290a5; }
 .task-sessions { margin-top: 12px; }
 .task-sessions summary { width: fit-content; cursor: pointer; color: #6075b6; font-size: 11px; font-weight: 700; }
 .task-sessions .session-grid { margin-top: 10px; }

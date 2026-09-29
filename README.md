@@ -65,6 +65,8 @@ npm run package:mac  # macOS: DMG와 ZIP
 5. **실행과 교차 검수:** 실행 담당 모델이 별도 Git worktree에서 파일을 수정하고, 다른 모델이 완료 기준에 따라 읽기 전용으로 검수합니다. 검수 결과와 산출물 경로를 기록합니다.
 6. **기록 검색과 대화 재개:** 전체 이력에서 단계별 이벤트와 CLI 실행 원문 JSONL을 함께 텍스트 검색합니다. 검색 결과나 논쟁 화면의 **CLI 원문 열기**로 해당 호출의 입력·출력 전체를 볼 수 있습니다. 프로젝트·업무의 **CLI에서 이어 열기**로 저장된 세션 ID를 외부 터미널에서 다시 열 수 있습니다. 앱을 닫아도 프로젝트 폴더의 기록은 남습니다.
 
+기존 Codex·Claude 대화를 활용하려면 프로젝트 개요의 **대화 가져오기**에서 이 컴퓨터의 JSONL 대화를 고르거나 파일을 직접 선택하세요. 선택한 시점의 원본 JSONL과 사용자·모델 발화가 프로젝트 Git에 복사되며 **전체 이력**에서 발화 내용을 검색할 수 있습니다. **이 대화로 업무 만들기**를 누르거나 업무 편집에서 참고 대화를 선택하면 두 모델의 토론·실행·검수 요청에 대화 맥락이 포함됩니다. 가져온 대화는 원래 채팅의 세션을 직접 이어 쓰거나 이후 변경을 자동 동기화하지 않습니다.
+
 ## CLI 대화 세션
 
 앱은 프로젝트 시작 대화, 업무별 Codex·Claude 토론 대화, 실행 대화, 검수 대화를 구분합니다. 같은 업무의 같은 모델·역할을 다시 호출할 때 저장한 세션 ID로 이어갑니다. 세션 카드는 프로젝트 개요와 각 업무에서 확인할 수 있습니다. **저장된 대화 보기**는 프로젝트 Git에 기록된 해당 세션의 요청과 응답을 이 앱 안에서 표시합니다. CLI나 제공자 데스크톱 앱에 연결되지 않아도 열 수 있으며, 각 응답의 **CLI 원문**에서 전체 실행 출력을 확인할 수 있습니다. **CLI에서 이어 열기**를 누르면 Windows에서는 명령 프롬프트, macOS에서는 Terminal이 열리고 Codex는 `codex resume --include-non-interactive <세션 ID>`, Claude는 `claude --resume <세션 ID>`를 실행합니다. **Codex 앱에서 보기**는 `codex://threads/<세션 ID>`로 해당 대화를 엽니다. **Claude Code 앱으로 가져오기**는 `claude://resume?session=<세션 ID>`로 CLI 대화를 Claude Code 데스크톱의 Code 탭에 가져오도록 요청합니다. [Codex CLI 세션 재개](https://learn.chatgpt.com/docs/developer-commands), [Codex 앱 딥 링크](https://learn.chatgpt.com/docs/reference/commands), [Claude Code 데스크톱과 CLI](https://code.claude.com/docs/en/desktop), [Claude 세션 링크 동작](https://github.com/anthropics/claude-code/issues/80773)
@@ -85,6 +87,7 @@ project-folder/
     tasks.json         # 업무, 담당 모델, 상태
     events.jsonl       # 대화·논쟁·작업·검수 이벤트
     runs/              # CLI 호출별 입력과 출력 원문(JSONL)
+    imports/           # 다른 앱에서 가져온 대화 원본과 발화 목록
   ...                  # 작업 산출물
 ```
 

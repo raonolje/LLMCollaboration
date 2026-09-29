@@ -67,9 +67,22 @@ const registerHandlers = (): void => {
       : await dialog.showOpenDialog(options);
     return result.canceled ? null : result.filePaths[0] ?? null;
   });
+  ipcMain.handle('collab:chooseConversationFile', async () => {
+    const options: Electron.OpenDialogOptions = {
+      title: 'Codex 또는 Claude 대화 JSONL 선택',
+      properties: ['openFile'],
+      filters: [{ name: '대화 기록', extensions: ['jsonl'] }],
+    };
+    const result = mainWindow ? await dialog.showOpenDialog(mainWindow, options) : await dialog.showOpenDialog(options);
+    return result.canceled ? null : result.filePaths[0] ?? null;
+  });
   ipcMain.handle('collab:setCliExecutable', (_event, provider, filePath) => service.setCliExecutable(provider, filePath));
   ipcMain.handle('collab:refreshCliStatus', () => service.refreshCliStatus());
   ipcMain.handle('collab:createProject', (_event, input) => service.createProject(input));
+  ipcMain.handle('collab:listLocalConversations', () => service.listLocalConversations());
+  ipcMain.handle('collab:importConversation', (_event, projectPath, provider, filePath) => service.importConversation(projectPath, provider, filePath));
+  ipcMain.handle('collab:readImportedConversation', (_event, projectPath, conversationId) => service.readImportedConversation(projectPath, conversationId));
+  ipcMain.handle('collab:readImportedConversationRaw', (_event, projectPath, conversationId) => service.readImportedConversationRaw(projectPath, conversationId));
   ipcMain.handle('collab:deleteProject', (_event, projectPath, projectId, confirmation) => service.deleteProject(projectPath, projectId, confirmation));
   ipcMain.handle('collab:openProject', (_event, projectPath) => service.openProject(projectPath));
   ipcMain.handle('collab:updateCharter', (_event, projectPath, charter) => service.updateCharter(projectPath, charter));
