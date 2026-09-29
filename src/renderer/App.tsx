@@ -116,6 +116,7 @@ export default function App() {
   const [planRequest, setPlanRequest] = useState('');
   const [runningTaskIds, setRunningTaskIds] = useState<ReadonlySet<string>>(() => new Set());
   const [cancelBusy, setCancelBusy] = useState(false);
+  const [cliBusy, setCliBusy] = useState<Provider | 'refresh' | null>(null);
 
   const project = snapshot?.project ?? null;
   const tasks = snapshot?.tasks ?? [];
@@ -198,6 +199,33 @@ export default function App() {
       const path = await window.collab.chooseDirectory();
       if (path) setProjectDraft((previous) => ({ ...previous, path }));
     });
+  };
+
+  const updateCliStatuses = (cli: Bootstrap['cli']): void =>
+    setBootstrap((previous) => previous && ({ ...previous, cli }));
+
+  const refreshCliStatuses = async (): Promise<void> => {
+    setCliBusy('refresh');
+    try {
+      updateCliStatuses(await window.collab.refreshCliStatus());
+    } catch (error) {
+      notify(errorText(error), true);
+    } finally {
+      setCliBusy(null);
+    }
+  };
+
+  const configureCli = async (provider: Provider, automatic = false): Promise<void> => {
+    setCliBusy(provider);
+    try {
+      const executable = automatic ? null : await window.collab.chooseCliExecutable();
+      if (!automatic && !executable) return;
+      updateCliStatuses(await window.collab.setCliExecutable(provider, executable));
+    } catch (error) {
+      notify(errorText(error), true);
+    } finally {
+      setCliBusy(null);
+    }
   };
 
   const submitProject = (event: FormEvent<HTMLFormElement>): void => {
@@ -554,15 +582,18 @@ export default function App() {
         <button className="side-action" onClick={() => setDialog('project')}><span className="plus">＋</span>새 프로젝트</button>
       </div>
       <div className="sidebar-bottom">
-        <div className="side-label" style={{ padding: 0 }}>로컬 CLI</div>
+        <div className="cli-heading"><div className="side-label">로컬 CLI</div><button className="cli-refresh" type="button" onClick={() => void refreshCliStatuses()} disabled={cliBusy !== null} title="CLI 설치 및 로그인 상태 다시 확인">{cliBusy === 'refresh' ? '확인 중…' : '↻ 상태 새로고침'}</button></div>
         {(['codex', 'claude'] as Provider[]).map((provider) => {
           const status = bootstrap?.cli.find((item) => item.provider === provider);
           const ready = Boolean(status?.installed && /^(?:ChatGPT|Claude) 구독 로그인/u.test(status.authentication ?? ''));
           return <div className="cli-entry" key={provider}>
-            <div className="cli-row"><strong>{providerLabel(provider)}</strong><span className={'status-indicator ' + (ready ? 'ok' : '')}>{ready ? '구독 준비됨' : status?.installed ? '로그인 확인 필요' : '설치 필요'}</span></div>
+            <div className="cli-row"><strong>{providerLabel(provider)}</strong><span className={'status-indicator ' + (ready ? 'ok' : '')}>{ready ? '구독 준비됨' : status?.installed ? '로그인 확인 필요' : status?.configured ? '지정 경로 확인 필요' : 'CLI 미발견'}</span></div>
             <div className="cli-auth">{status?.authentication ?? '상태 확인 중'}</div>
+            {status?.executable && <div className="cli-path" title={status.executable}>{status.executable}</div>}
+            <div className="cli-actions"><button type="button" onClick={() => void configureCli(provider)} disabled={cliBusy !== null}>{cliBusy === provider ? '확인 중…' : '경로 지정'}</button>{status?.configured && <button type="button" onClick={() => void configureCli(provider, true)} disabled={cliBusy !== null}>자동 탐색</button>}</div>
           </div>;
         })}
+        <p className="cli-help">로그인은 Codex·Claude CLI에서 진행합니다. 이 앱에는 계정 정보를 입력하지 않습니다.</p>
       </div>
     </aside>
     <div className="main">

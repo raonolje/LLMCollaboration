@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron';
 import path from 'node:path';
 import type { CollaborationEvent } from '../shared/types';
 import { createService } from './services';
@@ -14,6 +14,7 @@ const createWindow = (): BrowserWindow => {
     backgroundColor: '#10141c',
     title: 'LLM Collaboration',
     icon: path.join(app.getAppPath(), 'assets', 'icon.png'),
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -23,6 +24,7 @@ const createWindow = (): BrowserWindow => {
   });
 
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  if (process.platform !== 'darwin') window.setMenuBarVisibility(false);
   window.webContents.on('will-navigate', (event) => event.preventDefault());
 
   const devUrl = process.env.ELECTRON_DEV_URL;
@@ -53,6 +55,19 @@ const registerHandlers = (): void => {
       : await dialog.showOpenDialog(options);
     return result.canceled ? null : result.filePaths[0] ?? null;
   });
+  ipcMain.handle('collab:chooseCliExecutable', async () => {
+    const options: Electron.OpenDialogOptions = {
+      title: 'CLI 실행 파일 선택',
+      properties: ['openFile'],
+      ...(process.platform === 'win32' ? { filters: [{ name: 'CLI 실행 파일', extensions: ['exe', 'cmd'] }] } : {}),
+    };
+    const result = mainWindow
+      ? await dialog.showOpenDialog(mainWindow, options)
+      : await dialog.showOpenDialog(options);
+    return result.canceled ? null : result.filePaths[0] ?? null;
+  });
+  ipcMain.handle('collab:setCliExecutable', (_event, provider, filePath) => service.setCliExecutable(provider, filePath));
+  ipcMain.handle('collab:refreshCliStatus', () => service.refreshCliStatus());
   ipcMain.handle('collab:createProject', (_event, input) => service.createProject(input));
   ipcMain.handle('collab:openProject', (_event, projectPath) => service.openProject(projectPath));
   ipcMain.handle('collab:updateCharter', (_event, projectPath, charter) => service.updateCharter(projectPath, charter));
@@ -80,6 +95,7 @@ const registerHandlers = (): void => {
 };
 
 void app.whenReady().then(() => {
+  if (process.platform !== 'darwin') Menu.setApplicationMenu(null);
   registerHandlers();
   mainWindow = createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) mainWindow = createWindow(); });

@@ -30,9 +30,17 @@ input:focus, textarea:focus, select:focus { border-color: #6578ee; box-shadow: 0
 .side-action { margin-top: 8px; color: #94a7cb; border: 1px dashed #45536b; }
 .side-action .plus { font-size: 20px; line-height: 12px; }
 .sidebar-bottom { margin-top: auto; border-top: 1px solid #2b374d; padding: 17px 12px 0; }
+.cli-heading { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.cli-heading .side-label { padding: 0; margin: 0; }
+.cli-refresh, .cli-actions button { border: 0; padding: 0; background: transparent; color: #a9bbdd; font-size: 10px; font-weight: 700; }
+.cli-refresh:hover:not(:disabled), .cli-actions button:hover:not(:disabled) { color: #fff; text-decoration: underline; }
+.cli-refresh:disabled, .cli-actions button:disabled { opacity: .55; }
 .cli-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 11px 0 3px; font-size: 12px; }
 .cli-entry + .cli-entry { margin-top: 10px; }
 .cli-auth { padding-left: 1px; color: #8192b0; font-size: 10px; line-height: 1.45; }
+.cli-path { margin-top: 3px; color: #aebdda; font-size: 10px; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cli-actions { display: flex; gap: 13px; margin-top: 6px; }
+.cli-help { margin-top: 14px; color: #7385a6; font-size: 10px; line-height: 1.5; }
 .cli-row strong { color: #e8edf8; font-size: 12px; }
 .status-indicator { display: inline-flex; align-items: center; gap: 6px; color: #b9c7dc; }
 .status-indicator::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #ee8b75; }

@@ -105,6 +105,8 @@ export type CliStatus = Readonly<{
   installed: boolean;
   version?: string;
   authentication?: string;
+  executable?: string;
+  configured?: boolean;
 }>;
 
 export type Bootstrap = Readonly<{
@@ -122,6 +124,9 @@ export type ProjectSnapshot = Readonly<{
 export type CollaborationAPI = Readonly<{
   bootstrap: () => Promise<Bootstrap>;
   chooseDirectory: () => Promise<string | null>;
+  chooseCliExecutable: () => Promise<string | null>;
+  setCliExecutable: (provider: Provider, filePath: string | null) => Promise<CliStatus[]>;
+  refreshCliStatus: () => Promise<CliStatus[]>;
   createProject: (input: ProjectInput) => Promise<ProjectSnapshot>;
   openProject: (projectPath: string) => Promise<ProjectSnapshot>;
   updateCharter: (projectPath: string, charter: string) => Promise<ProjectSnapshot>;

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { createService } from '../src/main/services';
 import { git } from '../src/main/services/repository';
-import type { CliRequest, CliResult } from '../src/main/services/cli';
+import { cliStatus, type CliRequest, type CliResult } from '../src/main/services/cli';
 import type { CollaborationEvent, TaskInput } from '../src/shared/types';
 
 vi.mock('../src/main/services/cli', () => ({
@@ -268,4 +268,40 @@ describe('service orchestration with an injected model', () => {
     expect(afterOtherHost.tasks[0].sessions?.filter(({ hostId }) => hostId === afterOtherHost.localHostId)).toHaveLength(2);
     expect(afterOtherHost.tasks[0].sessions?.filter(({ hostId }) => hostId === created.localHostId)).toHaveLength(2);
   }), 60_000);
+});
+
+describe('local CLI executable settings', () => {
+  it('persists a selected executable beside the registry and restores automatic discovery', () => withTemporaryWorkspace(async (workspace) => {
+    const registryPath = path.join(workspace, 'app-data', 'registry.json');
+    const settingsPath = path.join(workspace, 'app-data', 'cli-settings.json');
+    const selected = path.join(workspace, 'custom-cli', 'codex.exe');
+    await mkdir(path.dirname(selected), { recursive: true });
+    await writeFile(selected, '', 'utf8');
+    const mockedStatus = vi.mocked(cliStatus);
+    const originalImplementation = mockedStatus.getMockImplementation();
+    mockedStatus.mockImplementation(async (provider, _cwd, configuredPath) => ({
+      provider,
+      installed: true,
+      version: provider === 'codex' ? 'codex-cli 0.158.0' : 'Claude Code 2.0.0',
+      authentication: provider === 'codex' ? 'ChatGPT 구독 로그인' : 'Claude 구독 로그인',
+      executable: configuredPath ?? `${provider}-auto`,
+      configured: configuredPath !== undefined,
+    }));
+    try {
+      const firstService = createService({ registryPath, emit: () => undefined, autoStartSessions: false });
+      const configured = await firstService.setCliExecutable('codex', selected);
+      expect(configured.find(({ provider }) => provider === 'codex'))
+        .toMatchObject({ executable: selected, configured: true, installed: true });
+      expect(JSON.parse(await readFile(settingsPath, 'utf8'))).toEqual({ codex: selected });
+
+      const restartedService = createService({ registryPath, emit: () => undefined, autoStartSessions: false });
+      expect((await restartedService.refreshCliStatus()).find(({ provider }) => provider === 'codex'))
+        .toMatchObject({ executable: selected, configured: true });
+      expect((await restartedService.setCliExecutable('codex', null)).find(({ provider }) => provider === 'codex'))
+        .toMatchObject({ executable: 'codex-auto', configured: false });
+      expect(JSON.parse(await readFile(settingsPath, 'utf8'))).toEqual({});
+    } finally {
+      if (originalImplementation) mockedStatus.mockImplementation(originalImplementation);
+    }
+  }));
 });

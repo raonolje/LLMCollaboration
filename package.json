@@ -1,6 +1,6 @@
 {
   "name": "llm-collaboration",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "구독형 CLI 기반 로컬 LLM 협업 앱",
   "main": "dist-electron/main/main.js",
@@ -16,10 +16,12 @@
     "package:mac": "npm run build && electron-builder --mac"
   },
   "dependencies": {
+    "cross-spawn": "^7.0.6",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },
   "devDependencies": {
+    "@types/cross-spawn": "^6.0.6",
     "@types/node": "^26.6.3",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",

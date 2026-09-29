@@ -6,6 +6,9 @@ const invoke = <T>(channel: string, ...args: unknown[]): Promise<T> => ipcRender
 const api: CollaborationAPI = {
   bootstrap: () => invoke('collab:bootstrap'),
   chooseDirectory: () => invoke('collab:chooseDirectory'),
+  chooseCliExecutable: () => invoke('collab:chooseCliExecutable'),
+  setCliExecutable: (provider, filePath) => invoke('collab:setCliExecutable', provider, filePath),
+  refreshCliStatus: () => invoke('collab:refreshCliStatus'),
   createProject: (input) => invoke('collab:createProject', input),
   openProject: (projectPath) => invoke('collab:openProject', projectPath),
   updateCharter: (projectPath, charter) => invoke('collab:updateCharter', projectPath, charter),

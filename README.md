@@ -4,14 +4,16 @@ Codex CLI와 Claude Code CLI를 한 프로젝트 안에서 조율하는 로컬 �
 
 > 현재 저장소는 초기 MVP입니다. 아래의 **현재 범위와 제한**을 확인한 뒤 중요한 프로젝트에 사용하세요.
 
-## 준비
+## 앱 사용 준비
 
-- Windows 또는 macOS, Node.js와 npm, Git
-- 실행 경로(`PATH`)에서 찾을 수 있는 Codex CLI와 Claude Code CLI
+- Windows 또는 macOS, Git
+- 이 컴퓨터에 설치된 Codex CLI와 Claude Code CLI
 - 두 CLI에 각각 로그인할 수 있는 계정과 사용 가능량
 - Claude Code v2.1.259 이상 (`--permission-prompts none` 사용)
 
-CLI 설치와 로그인 방법은 각 제품의 공식 문서를 따르세요. Codex는 `codex login`으로 ChatGPT 계정에 로그인하고 `codex login status`로 인증 방식을 확인할 수 있습니다. Claude Code는 `claude auth login`으로 로그인하고 `claude auth status`로 상태를 확인할 수 있습니다. 이 앱은 구독 사용을 위해 Claude Code의 `--bare` 모드를 사용하지 않습니다. [Codex CLI 인증](https://learn.chatgpt.com/docs/auth), [Claude Code CLI 명령](https://code.claude.com/docs/en/cli-reference), [Claude Code 인증](https://code.claude.com/docs/en/authentication)
+CLI 설치와 로그인 방법은 각 제품의 공식 문서를 따르세요. Codex는 `codex login`으로 ChatGPT 계정에 로그인하고 `codex login status`로 인증 방식을 확인할 수 있습니다. Claude Code는 `claude auth login`으로 로그인하고 `claude auth status`로 상태를 확인할 수 있습니다. 이 앱은 구독 사용을 위해 Claude Code의 `--bare` 모드를 사용하지 않습니다. **앱에 계정 정보나 API 키를 입력하지 않습니다.** 각 CLI가 이미 가진 로컬 로그인 상태를 조회해 사용하며, 앱이 인증 정보를 별도로 저장하지 않습니다. [Codex CLI 인증](https://learn.chatgpt.com/docs/auth), [Claude Code CLI 명령](https://code.claude.com/docs/en/cli-reference), [Claude Code 인증](https://code.claude.com/docs/en/authentication)
+
+CLI가 터미널의 `PATH`에도 등록돼 있다면 다음 명령으로 직접 확인할 수 있습니다.
 
 ```sh
 codex --version
@@ -21,11 +23,13 @@ claude auth status
 git --version
 ```
 
-Claude Code의 비대화형 실행(`claude -p`)은 `ANTHROPIC_API_KEY`가 설정돼 있으면 구독 로그인보다 해당 API 키를 사용합니다. 앱은 일부 API 및 외부 공급자 환경 변수를 자식 프로세스에서 제외하지만, 사용자의 전체 CLI 설정이나 계정 청구 경로를 대체해 관리하지는 않습니다. 실행 전에 두 CLI의 인증 상태와 설정을 직접 확인하세요. [Claude Code 환경 변수](https://code.claude.com/docs/en/env-vars)
+앱은 기기마다 CLI 실행 파일을 자동 탐색합니다. `PATH`와 일반적인 사용자 설치 위치를 확인하며, Windows에서는 npm 설치의 `.cmd` 실행 파일과 Codex 데스크톱 앱에 포함된 `%LOCALAPPDATA%\OpenAI\Codex\bin\*\codex.exe`도 찾습니다. 사이드바 **로컬 CLI**에 찾은 경로와 로그인 상태가 표시됩니다. 찾지 못했거나 다른 실행 파일을 사용하려면 각 모델의 **경로 지정**으로 실행 파일을 선택하세요. **자동 탐색**은 지정 경로를 해제하고, **상태 새로고침**은 설치·로그인 상태를 다시 확인합니다. 수동 경로는 이 컴퓨터의 Electron 사용자 데이터 `cli-settings.json`에만 저장되며 프로젝트 Git에는 들어가지 않습니다. Windows portable 실행 파일도 해당 기기 사용자 데이터의 설정을 읽습니다.
+
+Claude Code의 비대화형 실행(`claude -p`)은 `ANTHROPIC_API_KEY`가 설정돼 있으면 구독 로그인보다 해당 API 키를 사용합니다. 앱은 일부 API 및 외부 공급자 환경 변수를 자식 프로세스에서 제외하지만, 사용자의 전체 CLI 설정이나 계정 청구 경로를 대체해 관리하지는 않습니다. 실행 전에 사이드바에서 두 CLI의 인증 상태를 확인하세요. [Claude Code 환경 변수](https://code.claude.com/docs/en/env-vars)
 
 ## 개발 실행
 
-Windows PowerShell 또는 macOS 터미널에서 이 저장소의 루트로 이동한 뒤 실행합니다.
+개발에는 Node.js와 npm이 추가로 필요합니다. Windows PowerShell 또는 macOS 터미널에서 이 저장소의 루트로 이동한 뒤 실행합니다.
 
 ```sh
 npm ci
@@ -48,7 +52,7 @@ npm run package:win  # Windows: NSIS 설치 파일과 portable 실행 파일
 npm run package:mac  # macOS: DMG와 ZIP
 ```
 
-패키지는 `release/`에 생성됩니다. macOS 배포용 코드 서명과 공증 설정은 아직 포함돼 있지 않습니다. 빌드 명령이 존재하는 것과 해당 OS에서 설치 파일을 검증한 것은 별개입니다.
+패키지는 `release/`에 생성됩니다. Windows 앱 창의 메뉴 바는 제거됐고, macOS는 시스템 메뉴를 유지합니다. macOS 배포용 코드 서명과 공증 설정은 아직 포함돼 있지 않습니다. 빌드 명령이 존재하는 것과 해당 OS에서 설치 파일을 검증한 것은 별개입니다.
 
 앱 아이콘의 원본은 `assets/icon.svg`입니다. `npm run icons:png`는 원본에서 `assets/icon.png`를 다시 만들며, 앱 창과 패키지 리소스에 이 PNG를 사용합니다. Windows 패키지에는 `assets/icon.ico`, macOS 패키지에는 `assets/icon.icns`를 사용합니다. ICO·ICNS는 저장소에 포함돼 있으며 `icons:png` 명령으로는 재생성되지 않습니다. 세 형식을 모두 갱신하려면 PNG 생성 뒤 Pillow가 설치된 Python 환경에서 `python scripts/build-icons.py`를 실행하세요.
 

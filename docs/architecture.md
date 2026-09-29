@@ -22,10 +22,10 @@ flowchart LR
 | `src/shared/types.ts` | UI와 메인 프로세스가 공유하는 자료형과 IPC 계약 |
 | `src/renderer/` | 프로젝트·업무·논쟁·이력 화면과 사용자 입력 |
 | `src/main/preload.ts` | 허용된 기능만 `window.collab`으로 노출 |
-| `src/main/main.ts` | 창 생성, 폴더 선택 대화 상자, IPC 연결 |
+| `src/main/main.ts` | 창 생성, 프로젝트·CLI 실행 파일 선택 대화 상자, IPC 연결 |
 | `src/main/services/index.ts` | 프로젝트·업무 상태 전이, 토론 순서, 자동 계획, 실행·검수 조율 |
 | `src/main/services/prompts.ts` | 프로젝트 헌장, 업무 카드, 최근 기록으로 단계별 요청 문장 구성 |
-| `src/main/services/cli.ts` | 구독 로그인 확인, CLI 프로세스 실행, 표준 출력·오류 저장 |
+| `src/main/services/cli.ts` | 기기별 CLI 실행 파일 탐색, 구독 로그인 확인, CLI 프로세스 실행, 표준 출력·오류 저장 |
 | `src/main/services/repository.ts` | 프로젝트 파일, Git 커밋, 업무별 worktree 관리 |
 | `assets/`와 `scripts/build-icons.*` | SVG 원본, PNG·ICO·ICNS 패키지 아이콘과 생성 스크립트 |
 
@@ -35,7 +35,7 @@ Renderer는 Node.js 파일 API에 직접 접근하지 않습니다. Electron의 
 
 `Project`에는 폴더, 목표, 헌장, 기본 토론 횟수와 프로젝트 CLI 세션 목록이 있습니다. `Task`에는 지시, 완료 기준, 선행 업무, 실행·검수 모델, 상태와 업무별 CLI 세션 목록이 있습니다. 각 진행 단계는 `CollaborationEvent`로 남습니다. 이벤트에는 프로젝트와 업무 ID, 행위자, 단계, 시각, 내용, 토론 회차가 포함됩니다. `ExternalSession`에는 제공자, 세션 ID, 용도(프로젝트·토론·실행·검수), 작업 폴더, 생성·갱신 시각, 기기 ID가 있습니다.
 
-프로젝트의 `.llm-collaboration/project.json`과 `tasks.json`은 현재 상태를 빠르게 읽기 위한 자료입니다. `events.jsonl`은 단계별 기록을 순서대로 추가하는 로그입니다. `runs/*.jsonl`에는 각 CLI 호출의 입력 프롬프트, 세션 ID와 출력 원문을 저장합니다. 앱이 아는 프로젝트 목록은 Electron `userData/projects.json`에 별도로 저장하며, 그 기기를 구별하는 `session-host-id`도 같은 사용자 데이터 폴더에 만듭니다. 실제 프로젝트 원문과 산출물은 사용자가 고른 프로젝트 폴더에 있습니다.
+프로젝트의 `.llm-collaboration/project.json`과 `tasks.json`은 현재 상태를 빠르게 읽기 위한 자료입니다. `events.jsonl`은 단계별 기록을 순서대로 추가하는 로그입니다. `runs/*.jsonl`에는 각 CLI 호출의 입력 프롬프트, 세션 ID와 출력 원문을 저장합니다. 앱이 아는 프로젝트 목록은 Electron `userData/projects.json`에 별도로 저장하며, 그 기기를 구별하는 `session-host-id`도 같은 사용자 데이터 폴더에 만듭니다. 수동으로 선택한 CLI 실행 파일 경로는 같은 위치의 `cli-settings.json`에 저장합니다. 이 경로 설정과 기기 ID는 프로젝트 Git에 넣지 않습니다. 실제 프로젝트 원문과 산출물은 사용자가 고른 프로젝트 폴더에 있습니다.
 
 이 구조는 이벤트와 CLI 호출 원문을 보존하면서도 UI가 전체 로그를 재생하지 않고 현재 업무 상태를 읽게 합니다. 검색은 `events.jsonl`의 이벤트와 `runs/*.jsonl`의 각 원문 줄을 함께 확인합니다. 일치한 원문 줄은 발췌로 표시하고, `readTranscript`가 해당 실행 파일 전체를 열어 줍니다. 원문 열기는 경로를 정규화한 뒤 프로젝트의 `runs/` 안에 있는 JSONL 파일만 허용합니다. 의미 기반 검색이나 과거 자료를 찾아 프롬프트에 자동 주입하는 기능은 없습니다.
 
@@ -69,9 +69,11 @@ Renderer는 Node.js 파일 API에 직접 접근하지 않습니다. Electron의 
 
 ## CLI와 운영체제
 
-CLI 호출은 `execFile`/`spawn`으로 외부 실행 파일을 시작하고, 줄 단위 JSON 출력을 파싱합니다. Codex는 `codex exec --json`, Claude Code는 `claude -p --output-format stream-json`을 사용합니다. 두 제품의 옵션과 출력 형식은 업데이트될 수 있으므로 버전 호환성 검사가 필요합니다. 특히 현재 사용한 Claude Code `--permission-prompts none`은 v2.1.259 이상에서 지원됩니다. [Codex 비대화형 실행](https://learn.chatgpt.com/docs/non-interactive-mode), [Claude Code CLI 명령](https://code.claude.com/docs/en/cli-reference)
+CLI 경로는 기기마다 결정합니다. 사용자 지정 경로가 있으면 해당 파일을 먼저 사용합니다. 자동 탐색에서는 `PATH`, 사용자 홈의 `.local/bin`, macOS의 Homebrew 설치 위치를 살펴봅니다. Windows에서는 npm 설치가 만든 `codex.cmd`/`claude.cmd` shim과 `codex.exe`/`claude.exe`를 찾고, Codex는 `%LOCALAPPDATA%\OpenAI\Codex\bin\*\codex.exe`도 찾습니다. 설치된 Codex 데스크톱 앱이 제공하는 실행 파일을 재사용할 수 있으므로 Windows portable 패키지 안에 CLI를 복사하지 않습니다. 사이드바는 찾은 실행 파일과 버전, `codex login status` 또는 `claude auth status`에서 읽은 로컬 구독 로그인 상태를 표시합니다. **경로 지정**은 실행 파일을 검증한 뒤 이 사용자 계정의 `cli-settings.json`에만 저장하고, **자동 탐색**은 그 지정을 지웁니다. **상태 새로고침**은 두 CLI를 다시 탐색하고 인증 상태를 다시 읽습니다. 앱에는 계정 정보나 API 키 입력 화면이 없고 CLI 자격 증명을 따로 저장하지 않습니다.
 
-Windows와 macOS에서 같은 TypeScript 소스를 사용합니다. 경로는 Node `path`로 조합하고, 앱 창 생명 주기에서 macOS의 창 재활성화를 처리합니다. 패키징은 Windows에서 `package:win`으로 NSIS·portable, macOS에서 `package:mac`으로 DMG·ZIP을 만듭니다. `assets/icon.svg`가 아이콘 원본이고 `npm run icons:png`는 이를 PNG로 변환합니다. `scripts/build-icons.py`는 Pillow를 사용해 PNG에서 ICO·ICNS를 만듭니다. Electron 창과 빌드 리소스는 PNG를, OS별 패키지는 ICO·ICNS를 사용합니다. 현재 macOS 서명·공증, 각 OS의 설치 파일 검증, 여러 CLI 설치 방식에 대한 호환성 검증은 별도의 후속 작업입니다.
+CLI 호출은 실행 파일 종류에 따라 다릅니다. Windows의 `.cmd` shim은 버전·로그인 확인과 모델 실행 모두 `cross-spawn`으로 인자를 배열로 전달해 시작합니다. 네이티브 실행 파일은 짧은 상태 확인에 `execFile`, 모델 실행에 `spawn`을 사용합니다. 모델 프롬프트는 표준 입력으로 전달하고 JSONL 표준 출력을 줄 단위로 저장·파싱합니다. Codex는 `codex exec --json`, Claude Code는 `claude -p --output-format stream-json`을 사용합니다. 두 제품의 옵션과 출력 형식은 업데이트될 수 있으므로 버전 호환성 검사가 필요합니다. 특히 현재 사용한 Claude Code `--permission-prompts none`은 v2.1.259 이상에서 지원됩니다. [Codex 인증](https://learn.chatgpt.com/docs/auth), [Codex 비대화형 실행](https://learn.chatgpt.com/docs/non-interactive-mode), [Claude Code CLI 명령](https://code.claude.com/docs/en/cli-reference)
+
+Windows와 macOS에서 같은 TypeScript 소스를 사용합니다. 경로는 Node `path`로 조합하고, 앱 창 생명 주기에서 macOS의 창 재활성화를 처리합니다. Windows 창의 메뉴 바와 애플리케이션 메뉴는 숨기고, macOS에서는 시스템 메뉴를 유지합니다. 패키징은 Windows에서 `package:win`으로 NSIS·portable, macOS에서 `package:mac`으로 DMG·ZIP을 만듭니다. `assets/icon.svg`가 아이콘 원본이고 `npm run icons:png`는 이를 PNG로 변환합니다. `scripts/build-icons.py`는 Pillow를 사용해 PNG에서 ICO·ICNS를 만듭니다. Electron 창과 빌드 리소스는 PNG를, OS별 패키지는 ICO·ICNS를 사용합니다. 현재 macOS 서명·공증, 각 OS의 설치 파일 검증, 여러 CLI 설치 방식에 대한 호환성 검증은 별도의 후속 작업입니다.
 
 ## 변경하기 쉬운 경계
 

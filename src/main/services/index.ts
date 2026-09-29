@@ -38,7 +38,7 @@ import {
   writeJson,
 } from './repository';
 
-export type Service = Omit<CollaborationAPI, 'chooseDirectory' | 'onEvent' | 'openCodexDesktopSession'>;
+export type Service = Omit<CollaborationAPI, 'chooseDirectory' | 'chooseCliExecutable' | 'onEvent' | 'openCodexDesktopSession'>;
 
 export type ServiceOptions = Readonly<{
   registryPath: string;
@@ -161,6 +161,7 @@ const searchRun = async (
 };
 
 export const createService = ({ registryPath, emit, runModel = runCli, autoStartSessions = true }: ServiceOptions): Service => {
+  const cliSettingsPath = path.join(path.dirname(registryPath), 'cli-settings.json');
   const hostIdPromise = (async (): Promise<string> => {
     const file = path.join(path.dirname(registryPath), 'session-host-id');
     const existing = await readFile(file, 'utf8').catch((error: unknown) => {
@@ -189,6 +190,18 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
     withLock(`git:${projectPath}`, operation);
   const checkpoint = (projectPath: string, message: string): Promise<void> =>
     gitLock(projectPath, () => commitMetadata(projectPath, message));
+
+  const readCliSettings = async (): Promise<Partial<Record<Provider, string>>> =>
+    readFile(cliSettingsPath, 'utf8').then((content) => JSON.parse(content) as Partial<Record<Provider, string>>)
+      .catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+        throw error;
+      });
+  const cliPathFor = async (provider: Provider): Promise<string | undefined> => (await readCliSettings())[provider];
+  const cliStatuses = async (): Promise<CliStatus[]> => {
+    const settings = await readCliSettings();
+    return Promise.all(providers.map((provider) => cliStatus(provider, process.cwd(), settings[provider])));
+  };
 
   const snapshot = async (projectPath: string): Promise<ProjectSnapshot> => {
     const resolved = path.resolve(projectPath);
@@ -288,7 +301,8 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
     const previous = sessions.filter((session) =>
       session.hostId === hostId && session.provider === request.choice.provider && session.purpose === purpose,
     ).at(-1);
-    const result = await runModel({ ...request, sessionId: previous?.sessionId });
+    const result = await runModel({ ...request, sessionId: previous?.sessionId,
+      configuredPath: await cliPathFor(request.choice.provider) });
     if (result.sessionId) {
       const timestamp = now();
       const session: ExternalSession = {
@@ -394,12 +408,33 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
         });
       const [projectResults, cliResults] = await Promise.all([
         Promise.allSettled(projectPaths.map(async (projectPath) => ({ ...await readProject(projectPath), path: path.resolve(projectPath) }))),
-        Promise.all(providers.map((provider) => cliStatus(provider, process.cwd()))),
+        cliStatuses(),
       ]);
       const projects = projectResults
         .filter((result): result is PromiseFulfilledResult<Project> => result.status === 'fulfilled')
         .map((result) => result.value);
       return { projects, cli: cliResults as CliStatus[] };
+    },
+
+    refreshCliStatus: cliStatuses,
+
+    setCliExecutable: async (provider: Provider, filePath: string | null): Promise<CliStatus[]> => {
+      if (!providers.includes(provider)) throw new Error('지원하지 않는 CLI입니다.');
+      const selected = filePath?.trim() ? path.resolve(filePath) : undefined;
+      if (selected) {
+        const status = await cliStatus(provider, process.cwd(), selected);
+        const expected = provider === 'codex' ? /codex/iu : /Claude Code/iu;
+        if (!status.version || !expected.test(status.version)) {
+          throw new Error(`${provider} CLI 실행 파일을 확인할 수 없습니다. 올바른 실행 파일을 선택하세요.`);
+        }
+      }
+      await withLock('cli-settings', async () => {
+        const settings = await readCliSettings();
+        await writeJson(cliSettingsPath, selected
+          ? { ...settings, [provider]: selected }
+          : Object.fromEntries(Object.entries(settings).filter(([key]) => key !== provider)));
+      });
+      return cliStatuses();
     },
 
     createProject: async (input: ProjectInput): Promise<ProjectSnapshot> => {
@@ -504,8 +539,8 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
       await event(resolved, current.project.id, 'system', 'user', `자동 업무 분장 요청:\n${request.trim()}`);
       const planner = runModel !== runCli
         ? 'codex' as Provider
-        : await assertSubscription('codex', resolved).then(() => 'codex' as Provider).catch(async () => {
-          await assertSubscription('claude', resolved);
+        : await assertSubscription('codex', resolved, await cliPathFor('codex')).then(() => 'codex' as Provider).catch(async () => {
+          await assertSubscription('claude', resolved, await cliPathFor('claude'));
           return 'claude' as Provider;
         });
       const result = await trackedModel({
@@ -722,7 +757,7 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
       ].find((item) => item.sessionId === sessionId && item.hostId === current.localHostId);
       if (!session) throw new Error('이 컴퓨터에서 생성된 프로젝트 대화 세션이 아닙니다.');
       const cwd = await stat(session.cwd).then((value) => value.isDirectory() ? session.cwd : resolved).catch(() => resolved);
-      await openCliSession(session.provider, session.sessionId, cwd);
+      await openCliSession(session.provider, session.sessionId, cwd, await cliPathFor(session.provider));
     },
   };
   return service;
