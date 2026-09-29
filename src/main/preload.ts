@@ -1,0 +1,32 @@
+import { contextBridge, ipcRenderer } from 'electron';
+import type { CollaborationAPI, CollaborationEvent } from '../shared/types';
+
+const invoke = <T>(channel: string, ...args: unknown[]): Promise<T> => ipcRenderer.invoke(channel, ...args) as Promise<T>;
+
+const api: CollaborationAPI = {
+  bootstrap: () => invoke('collab:bootstrap'),
+  chooseDirectory: () => invoke('collab:chooseDirectory'),
+  createProject: (input) => invoke('collab:createProject', input),
+  openProject: (projectPath) => invoke('collab:openProject', projectPath),
+  updateCharter: (projectPath, charter) => invoke('collab:updateCharter', projectPath, charter),
+  updateProjectRounds: (projectPath, rounds) => invoke('collab:updateProjectRounds', projectPath, rounds),
+  createTask: (projectPath, input) => invoke('collab:createTask', projectPath, input),
+  planTasks: (projectPath, request) => invoke('collab:planTasks', projectPath, request),
+  updateTask: (projectPath, task) => invoke('collab:updateTask', projectPath, task),
+  autoAssign: (projectPath, taskId) => invoke('collab:autoAssign', projectPath, taskId),
+  runDebate: (projectPath, taskId) => invoke('collab:runDebate', projectPath, taskId),
+  continueDebate: (projectPath, taskId, followUp) => invoke('collab:continueDebate', projectPath, taskId, followUp),
+  executeTask: (projectPath, taskId) => invoke('collab:executeTask', projectPath, taskId),
+  cancelRun: (projectPath, taskId) => invoke('collab:cancelRun', projectPath, taskId),
+  search: (projectPath, query) => invoke('collab:search', projectPath, query),
+  readTranscript: (projectPath, transcript) => invoke('collab:readTranscript', projectPath, transcript),
+  openSession: (projectPath, sessionId) => invoke('collab:openSession', projectPath, sessionId),
+  openCodexDesktopSession: (projectPath, sessionId) => invoke('collab:openCodexDesktopSession', projectPath, sessionId),
+  onEvent: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, value: CollaborationEvent): void => listener(value);
+    ipcRenderer.on('collab:event', handler);
+    return () => ipcRenderer.removeListener('collab:event', handler);
+  },
+};
+
+contextBridge.exposeInMainWorld('collab', api);

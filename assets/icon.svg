@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="LLM Collaboration">
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#182449"/>
+      <stop offset="1" stop-color="#0e1528"/>
+    </linearGradient>
+    <linearGradient id="ribbon" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#b2bbff"/>
+      <stop offset="0.48" stop-color="#6f86f5"/>
+      <stop offset="1" stop-color="#465fd4"/>
+    </linearGradient>
+    <linearGradient id="spark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffd1a9"/>
+      <stop offset="1" stop-color="#e68157"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#background)"/>
+  <rect x="17" y="17" width="478" height="478" rx="111" fill="none" stroke="#8393cf" stroke-opacity=".25" stroke-width="2"/>
+  <path d="M300 111c-65-26-140-3-181 55-47 67-37 159 21 214 43 40 101 52 153 34"
+        fill="none" stroke="url(#ribbon)" stroke-width="40" stroke-linecap="round"/>
+  <path d="M211 144c-45 21-72 67-69 116 3 57 47 101 104 107 24 3 46-2 66-12"
+        fill="none" stroke="#cbd1ff" stroke-width="27" stroke-linecap="round"/>
+  <path d="M237 128c53-15 110 8 137 55 29 51 17 114-27 153"
+        fill="none" stroke="#526bdc" stroke-width="31" stroke-linecap="round"/>
+  <circle cx="314" cy="250" r="79" fill="#13203a"/>
+  <g fill="url(#spark)">
+    <rect x="302" y="139" width="24" height="73" rx="12"/>
+    <rect x="302" y="288" width="24" height="73" rx="12"/>
+    <rect x="351" y="238" width="73" height="24" rx="12"/>
+    <rect x="204" y="238" width="73" height="24" rx="12"/>
+    <rect x="302" y="139" width="24" height="73" rx="12" transform="rotate(45 314 250)"/>
+    <rect x="302" y="288" width="24" height="73" rx="12" transform="rotate(45 314 250)"/>
+    <rect x="351" y="238" width="73" height="24" rx="12" transform="rotate(45 314 250)"/>
+    <rect x="204" y="238" width="73" height="24" rx="12" transform="rotate(45 314 250)"/>
+    <circle cx="314" cy="250" r="37"/>
+  </g>
+  <circle cx="314" cy="250" r="16" fill="#fff3dd"/>
+</svg>
