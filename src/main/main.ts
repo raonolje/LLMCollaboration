@@ -103,6 +103,8 @@ const registerHandlers = (): void => {
   ipcMain.handle('collab:setCliExecutable', (_event, provider, filePath) => service.setCliExecutable(provider, filePath));
   ipcMain.handle('collab:refreshCliStatus', () => service.refreshCliStatus());
   ipcMain.handle('collab:createProject', (_event, input) => service.createProject(input));
+  ipcMain.handle('collab:sendProjectMessage', (_event, projectPath, message, target, models) => service.sendProjectMessage(projectPath, message, target, models));
+  ipcMain.handle('collab:cancelProjectMessage', (_event, projectPath) => service.cancelProjectMessage(projectPath));
   ipcMain.handle('collab:listLocalConversations', (_event, target?: LaunchRequest) => service.listLocalConversations(target));
   ipcMain.handle('collab:consumeLaunchRequest', () => {
     const request = pendingLaunch;

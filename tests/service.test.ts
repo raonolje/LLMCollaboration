@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { createService } from '../src/main/services';
+import { projectChatGuidance, taskCard } from '../src/main/services/prompts';
 import { ensureTaskWorktree, git, projectWorktreeDirectory } from '../src/main/services/repository';
 import { cliStatus, type CliRequest, type CliResult } from '../src/main/services/cli';
 import type { CollaborationEvent, TaskInput } from '../src/shared/types';
@@ -55,6 +56,42 @@ const recordMockTranscript = async (request: CliRequest, text: string): Promise<
 };
 
 describe('service orchestration with an injected model', () => {
+  it('sends project chat to both or one provider, resumes sessions, and keeps targeted directions scoped', () => withTemporaryWorkspace(async (workspace) => {
+    const projectPath = path.join(workspace, 'project');
+    const calls: CliRequest[] = [];
+    const service = createService({
+      registryPath: path.join(workspace, 'registry.json'), emit: () => undefined, autoStartSessions: false,
+      runModel: async (request) => {
+        calls.push(request);
+        return { ...await recordMockTranscript(request, `${request.choice.provider} received ${request.phase}`),
+          sessionId: request.sessionId ?? `${request.choice.provider}-project-session` };
+      },
+    });
+    await service.createProject({ path: projectPath, name: 'Team room', goal: 'Build a reviewed app' });
+    await service.updateCharter(projectPath, 'Keep all project records in Git.');
+    const first = await service.sendProjectMessage(projectPath, 'Both models: review the direction', 'both', { codex: 'codex-chat-model', claude: 'claude-chat-model' });
+    expect(calls.map(({ choice, readOnly, phase }) => [choice.provider, readOnly, phase])).toEqual([
+      ['codex', true, 'project-chat'], ['claude', true, 'project-chat'],
+    ]);
+    expect(calls.map(({ choice }) => choice.model)).toEqual(['codex-chat-model', 'claude-chat-model']);
+    expect(first.events.filter((item) => item.type === 'chat').map((item) => item.actor).sort()).toEqual(['claude', 'codex', 'user']);
+    expect(first.project.sessions?.map((item) => item.provider).sort()).toEqual(['claude', 'codex']);
+    expect(calls.every((call) => call.prompt.includes('Keep all project records in Git.'))).toBe(true);
+
+    const second = await service.sendProjectMessage(projectPath, 'Codex only: use the local index', 'codex', { codex: 'codex-next-model' });
+    expect(calls).toHaveLength(3);
+    expect(calls[2]).toMatchObject({ sessionId: 'codex-project-session', choice: { provider: 'codex' } });
+    expect(calls[2].choice.model).toBe('codex-next-model');
+    expect(second.events.filter((item) => item.type === 'chat' && item.actor === 'user').map((item) => item.metadata?.target))
+      .toEqual(['both', 'codex']);
+    expect(projectChatGuidance(second.events, 'codex')).toContain('use the local index');
+    expect(projectChatGuidance(second.events, 'claude')).not.toContain('use the local index');
+    expect(await git(projectPath, ['log', '-1', '--format=%s'])).toContain('Record chat');
+    const task = (await service.createTask(projectPath, taskInput())).tasks[0];
+    expect(taskCard(second.project, task, second.events, 'codex')).toContain('use the local index');
+    expect(taskCard(second.project, task, second.events, 'claude')).not.toContain('use the local index');
+  }), 30_000);
+
   it('runs two debate rounds, accepts a targeted follow-up, gets a second-model review, and merges approved work', () => withTemporaryWorkspace(async (workspace) => {
     const projectPath = path.join(workspace, 'project');
     const calls: CliRequest[] = [];

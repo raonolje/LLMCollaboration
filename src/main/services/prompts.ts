@@ -6,7 +6,14 @@ const compact = (value: string, max = 18_000): string =>
 const list = (values: readonly string[]): string =>
   values.length ? values.map((value, index) => `${index + 1}. ${value}`).join('\n') : '없음';
 
-export const taskCard = (project: Project, task: Task, events: readonly CollaborationEvent[]): string => {
+export const projectChatGuidance = (events: readonly CollaborationEvent[], recipient: Provider): string =>
+  events.filter((event) => event.type === 'chat' && event.actor === 'user'
+    && (event.metadata?.target === 'both' || event.metadata?.target === recipient))
+    .slice(-12)
+    .map((event) => `[${event.timestamp}] ${compact(event.message, 2000)}`)
+    .join('\n\n') || '추가 지시 없음';
+
+export const taskCard = (project: Project, task: Task, events: readonly CollaborationEvent[], recipient: Provider): string => {
   const relevant = events
     .filter((event) => event.taskId === task.id)
     .slice(-28)
@@ -17,6 +24,8 @@ export const taskCard = (project: Project, task: Task, events: readonly Collabor
     `프로젝트: ${project.name}`,
     `프로젝트 목표: ${compact(project.goal, 2000)}`,
     `프로젝트 헌장/제약: ${compact(project.charter || '아직 별도 헌장 없음', 4000)}`,
+    '## 팀장의 최근 채팅 지시',
+    projectChatGuidance(events, recipient),
     '## 현재 업무 카드',
     `업무 ID: ${task.id}`,
     `업무: ${task.title}`,
@@ -57,7 +66,7 @@ export const debatePrompt = (
     '작업 폴더를 수정하지 마세요. 근거 없는 합의나 상대 입장 추측을 피하세요.',
     `현재 단계: ${stage}${round ? `, ${round}회차` : ''}`,
     actions[stage],
-    taskCard(project, task, events),
+    taskCard(project, task, events, provider),
   ].join('\n\n');
 };
 
@@ -66,7 +75,7 @@ export const executionPrompt = (project: Project, task: Task, events: readonly C
   '현재 작업 폴더는 해당 업무 전용 Git worktree입니다. 프로젝트의 .llm-collaboration 폴더는 앱의 기록이므로 수정하지 마세요.',
   '완료 기준을 하나씩 충족하고 필요한 검증을 실행하세요. 다른 업무나 프로젝트 폴더 외부 파일은 수정하지 마세요.',
   '마지막 답변에는 수행 내용, 검증 명령과 결과, 미완료 항목, 수정 파일을 명시하세요.',
-  taskCard(project, task, events),
+  taskCard(project, task, events, task.executor.provider),
 ].join('\n\n');
 
 export const reviewPrompt = (
@@ -82,5 +91,5 @@ export const reviewPrompt = (
   '그 뒤에 기준별 평가, 파일 경로와 근거, 필요한 수정 사항을 적으세요.',
   `변경 파일:\n${list(changedFiles)}`,
   `실행 담당자 보고:\n${compact(executionSummary, 12_000)}`,
-  taskCard(project, task, events),
+  taskCard(project, task, events, task.reviewer.provider),
 ].join('\n\n');

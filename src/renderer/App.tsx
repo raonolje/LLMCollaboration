@@ -22,7 +22,7 @@ import type {
 import appIcon from '../../assets/icon.svg?url';
 import './styles.css';
 
-type Tab = 'overview' | 'tasks' | 'debate' | 'history';
+type Tab = 'chat' | 'overview' | 'tasks' | 'debate' | 'history';
 type Dialog = 'project' | 'task' | 'delete-project' | 'import-conversation' | 'imported-history' | 'transcript' | 'session-history' | null;
 
 const statusLabel: Record<TaskStatus, string> = {
@@ -48,6 +48,7 @@ const eventLabel: Record<EventType, string> = {
   status: '상태',
   error: '오류',
   artifact: '산출물',
+  chat: '채팅',
 };
 
 const debateTypes: EventType[] = ['proposal', 'critique', 'response', 'evaluation', 'decision'];
@@ -116,7 +117,7 @@ export default function App() {
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [snapshot, setSnapshot] = useState<ProjectSnapshot | null>(null);
-  const [tab, setTab] = useState<Tab>('overview');
+  const [tab, setTab] = useState<Tab>('chat');
   const [dialog, setDialog] = useState<Dialog>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [toast, setToast] = useState<{ message: string; error: boolean } | null>(null);
@@ -144,10 +145,18 @@ export default function App() {
   const [runningTaskIds, setRunningTaskIds] = useState<ReadonlySet<string>>(() => new Set());
   const [cancelBusy, setCancelBusy] = useState(false);
   const [cliBusy, setCliBusy] = useState<Provider | 'refresh' | null>(null);
+  const [chatDraft, setChatDraft] = useState('');
+  const [chatTarget, setChatTarget] = useState<Provider | 'both'>('both');
+  const [chatModels, setChatModels] = useState<Record<Provider, string>>({ codex: '', claude: '' });
+  const [chatSendingPaths, setChatSendingPaths] = useState<ReadonlySet<string>>(() => new Set());
 
   const project = snapshot?.project ?? null;
   const tasks = snapshot?.tasks ?? [];
   const events = snapshot?.events ?? [];
+  const chatSending = !!project && chatSendingPaths.has(project.path);
+  const chatEvents = useMemo(() => events.filter((event) => event.actor === 'codex' || event.actor === 'claude'
+    || (event.type === 'chat' && event.actor === 'user')
+    || (event.type === 'error' && typeof event.metadata?.provider === 'string')), [events]);
   const selectedDebateTask = tasks.find((task) => task.id === debateTaskId) ?? tasks[0];
   const debateEvents = useMemo(
     () => events.filter((event) => event.taskId === selectedDebateTask?.id && debateTypes.includes(event.type)),
@@ -233,7 +242,7 @@ export default function App() {
   const openProject = (item: Project): void => {
     void perform('프로젝트를 여는 중', async () => {
       await refresh(item.path);
-      setTab('overview');
+      setTab('chat');
     });
   };
 
@@ -327,7 +336,7 @@ export default function App() {
         } } : {}),
       }));
       setDialog(null);
-      setTab('overview');
+      setTab('chat');
       setProjectDraft(defaultProject);
       notify(selectedConversation || manualConversationPath.trim()
         ? '기존 대화를 가져와 협업 프로젝트를 만들었습니다. 대화는 프로젝트 Git에 저장됐습니다.'
@@ -599,6 +608,53 @@ export default function App() {
     }));
   };
 
+  const sendChat = (submitEvent: FormEvent<HTMLFormElement>): void => {
+    submitEvent.preventDefault();
+    if (!project || !chatDraft.trim() || chatSending) return;
+    const projectPath = project.path;
+    const message = chatDraft.trim();
+    const target = chatTarget;
+    const models = { ...chatModels };
+    setChatSendingPaths((previous) => new Set([...previous, projectPath]));
+    setChatDraft('');
+    void window.collab.sendProjectMessage(projectPath, message, target, models)
+      .then((next) => setSnapshot((current) => current?.project.path === projectPath ? next : current))
+      .catch((error) => { setChatDraft((current) => current || message); notify(errorText(error), true); })
+      .finally(() => setChatSendingPaths((previous) => new Set([...previous].filter((item) => item !== projectPath))));
+  };
+
+  const renderChat = () => (
+    <div className="section-stack">
+      <div className="toolbar"><div><h2>프로젝트 채팅</h2><p className="subtle">Codex와 Claude의 답변을 나란히 보며 팀장으로서 방향을 조정하세요.</p></div></div>
+      <div className="chat-grid">
+        {(['codex', 'claude'] as Provider[]).map((provider) => {
+          const visible = chatEvents.filter((item) => item.actor === provider
+            || (item.actor === 'user' && (item.metadata?.target === 'both' || item.metadata?.target === provider))
+            || (item.type === 'error' && item.metadata?.provider === provider));
+          return <section className={'panel chat-column ' + provider} key={provider} aria-label={`${providerLabel(provider)} 채팅`}>
+            <div className="chat-column-head"><span className={'model-chip ' + provider}>{providerLabel(provider)}</span><span className="subtle">{visible.length}개 기록</span></div>
+            <div className="chat-messages" aria-live="polite">
+              {visible.length ? visible.map((item) => <article className={'chat-message ' + (item.actor === 'user' ? 'from-user' : item.type === 'error' ? 'from-error' : 'from-model')} key={item.id}>
+                <div className="chat-message-head"><strong>{actorLabel(item.actor)}</strong>{item.type !== 'chat' && <span className="badge neutral">{eventLabel[item.type]}</span>}{item.taskId && <span className="badge neutral">{tasks.find((task) => task.id === item.taskId)?.title ?? '업무'}</span>}{item.actor === 'user' && item.metadata?.target === 'both' && <span className="badge neutral">두 모델 모두</span>}{item.type === 'chat' && item.actor === provider && item.metadata?.model && <span className="badge neutral">{item.metadata.model}</span>}<span className="activity-time">{shortTime(item.timestamp)}</span></div>
+                <div className="chat-message-text">{item.message}</div>
+                {item.metadata?.transcript && <button className="button ghost small" type="button" onClick={() => openTranscript(item)}>CLI 원문</button>}
+              </article>) : <Empty icon="◎" title="아직 대화가 없습니다" detail={`${providerLabel(provider)}에게 첫 메시지를 보내세요.`} />}
+            </div>
+          </section>;
+        })}
+      </div>
+      <form className="panel panel-pad chat-compose" onSubmit={sendChat}>
+        <div className="panel-head"><div><h2>지시 또는 질문</h2><p className="subtle">보낼 대상을 선택하세요. 지시는 프로젝트 Git 기록에 저장되고 이후 해당 모델의 업무 단계에도 전달됩니다.</p></div></div>
+        <div className="chat-targets" role="group" aria-label="메시지 받을 모델">
+          {([{ value: 'both', label: '두 모델 모두' }, { value: 'codex', label: 'Codex만' }, { value: 'claude', label: 'Claude만' }] as const).map(({ value, label }) => <button type="button" key={value} className={'button ' + (chatTarget === value ? 'primary' : '')} aria-pressed={chatTarget === value} onClick={() => setChatTarget(value)}>{label}</button>)}
+        </div>
+        <div className="form-grid chat-models">{(['codex', 'claude'] as Provider[]).map((provider) => <div className="field" key={provider}><label htmlFor={`chat-model-${provider}`}>{providerLabel(provider)} 추론 모델</label><input id={`chat-model-${provider}`} value={chatModels[provider]} maxLength={100} disabled={chatTarget !== 'both' && chatTarget !== provider} onChange={(event) => setChatModels((current) => ({ ...current, [provider]: event.target.value }))} placeholder="비우면 CLI 기본 모델" /><span>이 메시지에서 사용할 CLI 모델 이름</span></div>)}</div>
+        <div className="field"><label htmlFor="project-chat-input">메시지</label><textarea id="project-chat-input" value={chatDraft} maxLength={20_000} rows={4} onChange={(event) => setChatDraft(event.target.value)} placeholder="진행 상황을 묻거나, 수정할 방향과 완료 기준을 알려 주세요." /></div>
+        <div className="chat-compose-actions"><span className="subtle">현재 실행 중인 CLI 호출에는 다음 단계부터 반영됩니다.</span><div className="session-actions">{chatSending && <button className="button danger" type="button" onClick={() => project && void window.collab.cancelProjectMessage(project.path)}>응답 중단</button>}<button className="button primary" type="submit" disabled={!chatDraft.trim() || chatSending}>{chatSending ? '답변 받는 중…' : '메시지 보내기'}</button></div></div>
+      </form>
+    </div>
+  );
+
   const renderOverview = () => (
     <div className="section-stack">
       <div className="grid three">
@@ -775,8 +831,8 @@ export default function App() {
       <main className="content">
         {project ? <>
           <div className="page-head"><div><div className="eyebrow">WORKSPACE</div><h1>{project.name}</h1><p className="subtle">{project.goal || '프로젝트 목표를 바탕으로 두 모델이 계획하고 검수합니다.'}</p></div><div className="page-actions"><button className="button danger" type="button" disabled={!!busy || runningTaskIds.size > 0} onClick={() => { setDeleteConfirmation(''); setDialog('delete-project'); }}>프로젝트 삭제</button><button className="button" onClick={() => setTab('history')}>이력 검색</button><button className="button primary" onClick={() => openTaskDialog()}>＋ 새 업무</button></div></div>
-          <nav className="tabs" aria-label="프로젝트 화면"><button className={'tab ' + (tab === 'overview' ? 'active' : '')} onClick={() => setTab('overview')}>개요</button><button className={'tab ' + (tab === 'tasks' ? 'active' : '')} onClick={() => setTab('tasks')}>업무 <span className="tab-count">{tasks.length}</span></button><button className={'tab ' + (tab === 'debate' ? 'active' : '')} onClick={() => setTab('debate')}>논쟁</button><button className={'tab ' + (tab === 'history' ? 'active' : '')} onClick={() => setTab('history')}>전체 이력</button></nav>
-          {tab === 'overview' ? renderOverview() : tab === 'tasks' ? renderTasks() : tab === 'debate' ? renderDebate() : renderHistory()}
+          <nav className="tabs" aria-label="프로젝트 화면"><button className={'tab ' + (tab === 'chat' ? 'active' : '')} onClick={() => setTab('chat')}>채팅</button><button className={'tab ' + (tab === 'overview' ? 'active' : '')} onClick={() => setTab('overview')}>개요</button><button className={'tab ' + (tab === 'tasks' ? 'active' : '')} onClick={() => setTab('tasks')}>업무 <span className="tab-count">{tasks.length}</span></button><button className={'tab ' + (tab === 'debate' ? 'active' : '')} onClick={() => setTab('debate')}>논쟁</button><button className={'tab ' + (tab === 'history' ? 'active' : '')} onClick={() => setTab('history')}>전체 이력</button></nav>
+          {tab === 'chat' ? renderChat() : tab === 'overview' ? renderOverview() : tab === 'tasks' ? renderTasks() : tab === 'debate' ? renderDebate() : renderHistory()}
         </> : <div className="welcome"><div className="panel welcome-card"><div className="brand-symbol"><img src={appIcon} alt="" /></div><div className="eyebrow">LOCAL FIRST WORKSPACE</div><h1>두 모델의 관점을 한곳에서</h1><p className="subtle">프로젝트 폴더를 지정하고 Codex와 Claude가 논쟁, 분업, 교차 검수를 진행하도록 설정하세요. 모든 대화와 산출물은 로컬에 보존됩니다.</p><button className="button primary" onClick={openProjectDialog}>첫 프로젝트 만들기</button></div></div>}
       </main>
     </div>

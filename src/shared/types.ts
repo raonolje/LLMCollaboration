@@ -116,7 +116,8 @@ export type EventType =
   | 'review'
   | 'status'
   | 'error'
-  | 'artifact';
+  | 'artifact'
+  | 'chat';
 
 export type CollaborationEvent = Readonly<{
   id: string;
@@ -159,6 +160,8 @@ export type CollaborationAPI = Readonly<{
   setCliExecutable: (provider: Provider, filePath: string | null) => Promise<CliStatus[]>;
   refreshCliStatus: () => Promise<CliStatus[]>;
   createProject: (input: ProjectInput) => Promise<ProjectSnapshot>;
+  sendProjectMessage: (projectPath: string, message: string, target: Provider | 'both', models: Partial<Record<Provider, string>>) => Promise<ProjectSnapshot>;
+  cancelProjectMessage: (projectPath: string) => Promise<void>;
   listLocalConversations: (target?: LaunchRequest) => Promise<ConversationCandidate[]>;
   consumeLaunchRequest: () => Promise<LaunchRequest | null>;
   onLaunchRequest: (listener: (request: LaunchRequest) => void) => () => void;

@@ -23,7 +23,7 @@ import type {
   TaskStatus,
 } from '../../shared/types';
 import { assertSubscription, cliStatus, openCliSession, runCli, type CliRequest, type CliResult } from './cli';
-import { debatePrompt, executionPrompt, reviewPrompt, taskCard } from './prompts';
+import { debatePrompt, executionPrompt, projectChatGuidance, reviewPrompt, taskCard } from './prompts';
 import {
   appendEvent,
   commitMetadata,
@@ -504,7 +504,7 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
         '합의된 결정, 남은 이견, 이견별 판단 근거, 실제 실행 단계, 완료 기준과 검증 방법을 구분하세요.',
         '상대 의견이 해결되지 않았으면 합의로 꾸미지 말고 미해결이라고 명시하세요.',
         `양측 평가:\n${evaluations.map((item) => `${item.actor}: ${item.message}`).join('\n\n')}`,
-        taskCard(project, task, events),
+        taskCard(project, task, events, task.reviewer.provider),
       ].join('\n\n'),
       phase: 'debate-synthesis', readOnly: true, signal,
     }, 'debate', taskId);
@@ -514,6 +514,67 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
 
   const service: Service = {
     listLocalConversations,
+    sendProjectMessage: async (projectPath: string, message: string, target: Provider | 'both', models: Partial<Record<Provider, string>> = {}): Promise<ProjectSnapshot> => {
+      const resolved = path.resolve(projectPath);
+      const text = message.trim();
+      if (!text || text.length > 20_000) throw new Error('채팅 메시지는 1~20,000자로 입력하세요.');
+      if (target !== 'both' && !providers.includes(target)) throw new Error('채팅 대상을 선택하세요.');
+      const selectedModels = Object.fromEntries(providers.map((provider) => [provider, (models?.[provider] ?? '').trim()])) as Record<Provider, string>;
+      if (Object.values(selectedModels).some((model) => model.length > 100 || /[\r\n]/u.test(model))) throw new Error('모델 이름은 줄바꿈 없이 100자 이하로 입력하세요.');
+      const controller = begin(resolved, 'project-chat');
+      try {
+        const project = await readProject(resolved);
+        const userMessage = await event(resolved, project.id, 'chat', 'user', text, undefined, undefined,
+          { target, codexModel: selectedModels.codex || 'default', claudeModel: selectedModels.claude || 'default' });
+        const targets = target === 'both' ? providers : [target];
+        await Promise.all(targets.map(async (provider) => {
+          try {
+            const current = await snapshot(resolved);
+            const visibleUserMessages = new Set(current.events.filter((item) => item.type === 'chat' && item.actor === 'user'
+              && (item.metadata?.target === 'both' || item.metadata?.target === provider)).map((item) => item.id));
+            const recent = current.events.filter((item) => item.type === 'chat' && item.id !== userMessage.id
+              && (item.actor === 'user' ? visibleUserMessages.has(item.id)
+                : item.metadata?.replyTo ? visibleUserMessages.has(String(item.metadata.replyTo)) : item.actor === provider))
+              .slice(-16).map((item) => `${item.actor === 'user' ? '사용자' : item.actor}: ${item.message.slice(0, 1800)}`)
+              .join('\n\n').slice(-20_000);
+            const hasSession = current.project.sessions?.some((session) => session.hostId === current.localHostId
+              && session.provider === provider && session.purpose === 'project');
+            const taskState = current.tasks.map((task) => `${task.title} [${task.status}] · 수행 ${task.executor.provider} · 검수 ${task.reviewer.provider}\n${task.description.slice(0, 800)}\n최근 결론: ${(task.reviewSummary || task.debateSummary || '없음').slice(0, 900)}`)
+              .join('\n\n').slice(-12_000);
+            const taskActivity = current.events.filter((item) => item.taskId && ['decision', 'execution', 'review', 'status', 'error'].includes(item.type))
+              .slice(-10).map((item) => `${item.actor}/${item.type}: ${item.message.slice(0, 1200)}`).join('\n\n').slice(-10_000);
+            const importedContext = hasSession ? '' : (await Promise.all((current.project.importedConversations ?? []).slice(0, 3)
+              .map(async (conversation) => conversationContext(conversation, await readImportedTurns(resolved, conversation.id)))))
+              .join('\n\n---\n\n').slice(0, 42_000);
+            const result = await trackedModel({
+              projectPath: resolved, cwd: resolved, choice: { provider, model: selectedModels[provider] || 'default' },
+              prompt: [
+                `프로젝트: ${current.project.name}`,
+                `목표: ${current.project.goal}`,
+                `항상 유지할 기준: ${current.project.charter || '추가 제약 없음'}`,
+                taskState && `현재 업무 현황:\n${taskState}`,
+                taskActivity && `최근 업무 진행 기록:\n${taskActivity}`,
+                importedContext && `가져온 대화의 맥락:\n${importedContext}`,
+                recent && `공유 채팅의 최근 대화:\n${recent}`,
+                `현재 사용자 메시지 (${target === 'both' ? '두 모델 모두' : provider}에게 전달):\n${text}`,
+                '현재 메시지에 답하세요. 파일 변경이 필요한 요청이라면 실행할 업무와 완료 기준을 제안하세요.',
+              ].filter(Boolean).join('\n\n'),
+              phase: 'project-chat', readOnly: true, signal: controller.signal,
+            }, 'project');
+            await event(resolved, project.id, 'chat', provider, result.text, undefined, undefined,
+              { replyTo: userMessage.id, transcript: result.transcript, sessionId: result.sessionId ?? null, model: selectedModels[provider] || 'default' });
+          } catch (error) {
+            await event(resolved, project.id, 'error', 'system',
+              `${provider === 'codex' ? 'Codex' : 'Claude'} 응답 ${controller.signal.aborted ? '취소됨' : `실패: ${errorText(error)}`}`,
+              undefined, undefined, { replyTo: userMessage.id, provider });
+          }
+        }));
+        return snapshot(resolved);
+      } finally { finish(resolved, 'project-chat'); }
+    },
+    cancelProjectMessage: async (projectPath: string): Promise<void> => {
+      active.get(key(projectPath, 'project-chat'))?.abort();
+    },
     bootstrap: async (): Promise<Bootstrap> => {
       const projectPaths = await readRegisteredPaths();
       const [projectResults, cliResults] = await Promise.all([
@@ -782,6 +843,7 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
           '최대 12개 업무로 나누고, 각 완료 기준은 구체적으로 검증 가능해야 합니다. 겹치는 업무를 만들지 마세요.',
           `프로젝트 목표: ${current.project.goal}`,
           `프로젝트 헌장: ${current.project.charter || '없음'}`,
+          `팀장의 최근 채팅 지시:\n${projectChatGuidance(current.events, planner)}`,
           `사용자 요청: ${request.trim()}`,
           `기존 업무: ${current.tasks.map((task) => `${task.title} (${task.status})`).join('; ') || '없음'}`,
         ].join('\n\n'),
@@ -908,7 +970,7 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
           const revised = await perform([
             '교차 검수에서 수정을 요청했습니다. 지적된 문제를 실제 파일에 고친 뒤 검증하세요.',
             `검수 의견:\n${result.text}`,
-            taskCard(latest.project, latest.task, latest.events),
+            taskCard(latest.project, latest.task, latest.events, latest.task.executor.provider),
           ].join('\n\n'), `task-revision-${attempt}`);
           return review(revised, attempt + 1);
         };
