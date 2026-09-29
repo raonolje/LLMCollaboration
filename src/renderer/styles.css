@@ -228,7 +228,6 @@ p { margin: 0; }
 .chat-targets { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
 .chat-model-heading { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 10px; font-size: 12px; color: #465572; }
 .chat-models { margin-bottom: 15px; }
-.chat-task-executor { max-width: 340px; margin-top: 12px; }
 .chat-model-warning { color: #a36a2b !important; line-height: 1.5; }
 .chat-compose-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 15px; }
 @media (max-width: 760px) { .chat-grid { grid-template-columns: 1fr; } .chat-messages { height: 320px; } .chat-compose-actions { align-items: flex-start; flex-direction: column; } }

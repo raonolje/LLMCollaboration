@@ -124,6 +124,9 @@ const validateTaskInput = (input: TaskInput, project: Project, tasks: readonly T
   if (!providers.includes(input.executor.provider) || !providers.includes(input.reviewer.provider)) {
     throw new Error('Codex 또는 Claude 모델을 지정하세요.');
   }
+  if ([input.executor.effort, input.reviewer.effort].some((effort) => effort && !['low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(effort))) {
+    throw new Error('추론 수준이 올바르지 않습니다.');
+  }
   if (input.mode === 'manual' && input.executor.provider === input.reviewer.provider) {
     throw new Error('교차 검수를 위해 실행과 검수에 서로 다른 모델을 지정하세요.');
   }
@@ -423,7 +426,7 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
     ).at(-1);
     const configuredPath = await cliPathFor(request.choice.provider);
     let restarted = false;
-    const result = await runModel({ ...request, sessionId: previous?.sessionId, configuredPath })
+    const result = await runModel({ ...request, effort: request.effort ?? request.choice.effort, sessionId: previous?.sessionId, configuredPath })
       .catch(async (error: unknown) => {
         if (request.choice.provider !== 'codex' || !previous?.sessionId
           || !/thread-store conflict|already has an active writer/iu.test(errorText(error))) throw error;
@@ -431,7 +434,7 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
         const importedContext = (await Promise.all((current.project.importedConversations ?? []).slice(0, 3)
           .map(async (conversation) => conversationContext(conversation, await readImportedTurns(request.projectPath, conversation.id)))))
           .join('\n\n---\n\n').slice(0, 42_000);
-        return runModel({ ...request, sessionId: undefined, configuredPath,
+        return runModel({ ...request, effort: request.effort ?? request.choice.effort, sessionId: undefined, configuredPath,
           prompt: [request.prompt, '기존 Codex 채팅이 다른 앱에서 사용 중이므로 새 채팅에서 이어갑니다.',
             importedContext && `가져온 기존 대화의 맥락:\n${importedContext}`].filter(Boolean).join('\n\n') });
       });
@@ -925,7 +928,8 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
       const task: Task = { ...validated, ...choices, id: randomUUID(), status: 'draft', createdAt: timestamp, updatedAt: timestamp, artifacts: [] };
       await stateLock(resolved, async () => writeJson(projectFiles(resolved).tasks, [...await readTasks(resolved), task]));
       await checkpoint(resolved, `Create task ${task.id}`);
-      await event(resolved, current.project.id, 'status', 'user', `업무를 생성했습니다: ${task.title}. 수행 ${task.executor.provider}, 검수 ${task.reviewer.provider}.`, task.id);
+      await event(resolved, current.project.id, 'status', 'user', `업무 요청: ${task.title}\n\n${task.description}\n\n수행 ${task.executor.provider}, 검수 ${task.reviewer.provider}.`, task.id, undefined,
+        { target: task.executor.provider, taskRequest: true });
       return snapshot(resolved);
     },
 

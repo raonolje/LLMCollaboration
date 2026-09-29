@@ -106,7 +106,7 @@ const emptyTask = (debateRounds = 2): TaskInput => ({
 const defaultProject: ProjectInput = { name: '', path: '', goal: '', defaultDebateRounds: 2 };
 
 function ModelChip({ choice }: { choice: ModelChoice }) {
-  return <span className={'model-chip ' + choice.provider}>{providerLabel(choice.provider)}{choice.model ? ' · ' + choice.model : ''}</span>;
+  return <span className={'model-chip ' + choice.provider}>{providerLabel(choice.provider)}{choice.model ? ' · ' + choice.model : ''}{choice.effort ? ' · ' + choice.effort : ''}</span>;
 }
 
 function Empty({ icon, title, detail }: { icon: string; title: string; detail: string }) {
@@ -197,7 +197,6 @@ export default function App() {
   const [chatFiles, setChatFiles] = useState<ChatFileInput[]>([]);
   const [chatDragActive, setChatDragActive] = useState(false);
   const [chatDiscussion, setChatDiscussion] = useState(false);
-  const [chatTaskExecutor, setChatTaskExecutor] = useState<Provider>('codex');
   const [discussingMessageId, setDiscussingMessageId] = useState<string | null>(null);
   const [clockMs, setClockMs] = useState(() => Date.now());
   useEffect(() => { const timer = setInterval(() => setClockMs(Date.now()), 1000); return () => clearInterval(timer); }, []);
@@ -221,7 +220,6 @@ export default function App() {
       .finally(() => setRemoteBusy(false));
   };
   const [chatSendingPaths, setChatSendingPaths] = useState<ReadonlySet<string>>(() => new Set());
-  const [chatTaskId, setChatTaskId] = useState<string | null>(null);
 
   const project = snapshot?.project ?? null;
   const tasks = snapshot?.tasks ?? [];
@@ -229,6 +227,7 @@ export default function App() {
   const chatSending = !!project && chatSendingPaths.has(project.path);
   const chatEvents = useMemo(() => events.filter((event) => event.actor === 'codex' || event.actor === 'claude'
     || (event.type === 'chat' && event.actor === 'user')
+    || (event.type === 'status' && event.actor === 'user' && event.metadata?.taskRequest === true)
     || (event.type === 'error' && typeof event.metadata?.provider === 'string')), [events]);
   const selectedDebateTask = tasks.find((task) => task.id === debateTaskId) ?? tasks[0];
   const debateEvents = useMemo(
@@ -750,10 +749,11 @@ export default function App() {
 
   const requestChatTask = (): void => {
     if (!project || !chatDraft.trim() || chatSending) return;
+    if (chatTarget === 'both') { notify('업무 담당 모델을 Codex만 또는 Claude만으로 선택해 주세요.', true); return; }
     const projectPath = project.path;
     const message = chatDraft.trim();
     const files = [...chatFiles];
-    const executor = chatTarget === 'both' ? chatTaskExecutor : chatTarget;
+    const executor = chatTarget;
     const reviewer: Provider = executor === 'codex' ? 'claude' : 'codex';
     const title = message.split(/\r?\n/u).find((line) => line.trim())?.trim().slice(0, 80) ?? '채팅 업무';
     setChatSendingPaths((previous) => new Set([...previous, projectPath]));
@@ -766,40 +766,41 @@ export default function App() {
         const attachmentPaths = typeof attachmentEvent?.metadata?.attachments === 'string'
           ? (JSON.parse(attachmentEvent.metadata.attachments) as Array<{ path: string }>).map((file) => file.path).join('\n')
           : '';
-        const input: TaskInput = {
+        const created = await window.collab.createTask(projectPath, {
           title,
           description: [message, attachmentPaths && `첨부 자료 경로 (프로젝트 폴더 기준):\n${attachmentPaths}`].filter(Boolean).join('\n\n'),
-          acceptanceCriteria: ['요청한 결과를 프로젝트 폴더에 저장하고, 요구사항 충족 여부를 검수 모델이 확인한다.'],
-          mode: 'manual',
-          executor: { provider: executor, model: chatModels[executor].model },
-          reviewer: { provider: reviewer, model: chatModels[reviewer].model },
-          dependsOn: [],
+          acceptanceCriteria: ['요청한 결과를 프로젝트 폴더에 저장하고, 상대 모델이 요구사항 충족 여부를 확인한다.'],
+          mode: 'manual', executor: { provider: executor, model: chatModels[executor].model, effort: chatModels[executor].effort },
+          reviewer: { provider: reviewer, model: chatModels[reviewer].model, effort: chatModels[reviewer].effort }, dependsOn: [],
           debateRounds: project.defaultDebateRounds,
-        };
-        const created = await window.collab.createTask(projectPath, input);
-        const task = created.tasks.find((item) => !tasks.some((previous) => previous.id === item.id));
+        });
+        const task = created.tasks.at(-1);
         if (!task) throw new Error('생성된 업무를 찾을 수 없습니다. 업무 탭을 확인해 주세요.');
         setSnapshot((current) => current?.project.path === projectPath ? created : current);
         setChatDraft('');
         setChatFiles([]);
+        setChatSendingPaths((previous) => new Set([...previous].filter((item) => item !== projectPath)));
         setRunningTaskIds((previous) => new Set([...previous, task.id]));
-        setChatTaskId(task.id);
         setDebateTaskId(task.id);
         setDebateScope('task');
         setTab('debate');
-        notify('업무를 만들었습니다. 두 모델의 토론과 실행·교차 검수를 시작합니다.');
+        notify(`${providerLabel(executor)} 업무를 시작했습니다. 완료 후 ${providerLabel(reviewer)}가 검수합니다.`);
         try {
           await window.collab.runDebate(projectPath, task.id);
           const debated = await window.collab.openProject(projectPath);
-          if (!debated.tasks.find((item) => item.id === task.id)?.debateSummary) {
-            notify('토론이 종료되어 업무 실행은 시작하지 않았습니다.');
-            return;
-          }
+          if (!debated.tasks.find((item) => item.id === task.id)?.debateSummary) throw new Error(`${task.title}의 토론이 완료되지 않아 실행을 중단했습니다.`);
           await window.collab.executeTask(projectPath, task.id);
-          notify('업무 실행과 교차 검수가 끝났습니다. 결과를 확인해 주세요.');
+          const finished = await window.collab.openProject(projectPath);
+          const opposite = finished.tasks.filter((item) => item.id !== task.id && item.status === 'approved'
+            && item.executor.provider === reviewer).at(-1);
+          if (finished.tasks.find((item) => item.id === task.id)?.status === 'approved' && opposite) {
+            await window.collab.sendProjectMessage(projectPath,
+              `완료된 두 업무의 산출물을 서로 읽고 비교 분석하세요. ${providerLabel(executor)} 업무: ${task.title}. ${providerLabel(reviewer)} 업무: ${opposite.title}. 요구사항 누락, 파일 간 충돌, 품질 차이와 보완할 일을 구체적으로 토론하고 결론을 내려 주세요.`,
+              'both', chatModels, [], true);
+            notify('두 모델의 업무 결과를 교차 비교한 토론을 기록했습니다.');
+          } else notify('업무 실행과 상대 모델의 검수가 끝났습니다.');
         } finally {
           setRunningTaskIds((previous) => new Set([...previous].filter((id) => id !== task.id)));
-          setChatTaskId(null);
         }
       } catch (error) {
         notify(errorText(error), true);
@@ -878,7 +879,7 @@ export default function App() {
             <div className="chat-column-head"><span className={'model-chip ' + provider}>{providerLabel(provider)}</span><span className="subtle">{visible.length}개 기록</span></div>
             <div className="chat-messages" aria-live="polite">
               {visible.length ? visible.map((item) => <article className={'chat-message ' + (item.actor === 'user' ? 'from-user' : item.type === 'error' ? 'from-error' : 'from-model')} key={item.id}>
-                <div className="chat-message-head"><strong>{actorLabel(item.actor)}</strong>{item.type !== 'chat' && <span className="badge neutral">{eventLabel[item.type]}</span>}{item.metadata?.discussionRound && <span className="badge neutral">토론 {item.metadata.discussionRound}회차</span>}{item.taskId && <span className="badge neutral">{tasks.find((task) => task.id === item.taskId)?.title ?? '업무'}</span>}{item.actor === 'user' && item.metadata?.target === 'both' && <span className="badge neutral">두 모델 모두</span>}{item.type === 'chat' && item.actor === provider && item.metadata?.model && <span className="badge neutral">{item.metadata.model}{item.metadata.effort && item.metadata.effort !== 'default' ? ` · ${item.metadata.effort}` : ''}</span>}<span className="activity-time">{shortTime(item.timestamp)}</span></div>
+                <div className="chat-message-head"><strong>{actorLabel(item.actor)}</strong>{item.type !== 'chat' && <span className="badge neutral">{item.metadata?.taskRequest ? '업무 요청' : eventLabel[item.type]}</span>}{item.metadata?.discussionRound && <span className="badge neutral">토론 {item.metadata.discussionRound}회차</span>}{item.taskId && <span className="badge neutral">{tasks.find((task) => task.id === item.taskId)?.title ?? '업무'}</span>}{item.actor === 'user' && item.metadata?.target === 'both' && <span className="badge neutral">두 모델 모두</span>}{item.type === 'chat' && item.actor === provider && item.metadata?.model && <span className="badge neutral">{item.metadata.model}{item.metadata.effort && item.metadata.effort !== 'default' ? ` · ${item.metadata.effort}` : ''}</span>}<span className="activity-time">{shortTime(item.timestamp)}</span></div>
                 <div className="chat-message-text">{item.message}</div>
                 {chatAttachments(item).length > 0 && <div className="chat-attachments">{chatAttachments(item).map((file) => <span className="badge neutral" key={file.path}>📎 {file.name} · {(file.size / 1024).toFixed(0)}KB</span>)}</div>}
                 {item.actor === 'user' && provider === 'codex' && item.metadata?.target === 'both' && !item.metadata?.discussion && !events.some((record) => record.metadata?.replyTo === item.id && record.metadata?.discussionConclusion)
@@ -915,10 +916,9 @@ export default function App() {
           </div>;
         })}</div>
         <div className="field"><label htmlFor="project-chat-input">메시지</label><textarea id="project-chat-input" value={chatDraft} maxLength={20_000} rows={4} onChange={(event) => setChatDraft(event.target.value)} onPaste={pasteChatFiles} placeholder="메시지 입력 · 이미지 여러 개 드래그 또는 Ctrl+V로 스크린샷 붙여넣기" /></div>
-        {chatTarget === 'both' && <div className="field chat-task-executor"><label htmlFor="chat-task-executor">업무 실행 담당</label><select id="chat-task-executor" value={chatTaskExecutor} onChange={(event) => setChatTaskExecutor(event.target.value as Provider)}><option value="codex">Codex 실행 · Claude 검수</option><option value="claude">Claude 실행 · Codex 검수</option></select></div>}
         <label className="chat-discussion-toggle"><input type="checkbox" checked={chatDiscussion} disabled={chatTarget !== 'both'} onChange={(event) => setChatDiscussion(event.target.checked)} />두 모델이 서로 반론하며 토론하기 · 기본 {project?.defaultDebateRounds ?? 2}회 왕복</label>
         <div className="chat-attachments"><button className="button small" type="button" disabled={chatSending || chatFiles.length >= 5} onClick={() => void window.collab.chooseChatFiles().then((chosen) => setChatFiles((current) => [...current, ...chosen].slice(0, 5))).catch((error: unknown) => notify(errorText(error), true))}>＋ 이미지·파일 첨부</button>{chatFiles.map((file, index) => <button className="button ghost small" type="button" key={`${pendingFileName(file)}-${index}`} title={pendingFileName(file)} onClick={() => setChatFiles((current) => current.filter((_, position) => position !== index))}>📎 {pendingFileName(file)} ×</button>)}</div>
-        <div className="chat-compose-actions"><span className="subtle">첨부 파일은 프로젝트 Git에 저장됩니다. 업무로 요청하면 토론 → 실행 → 다른 모델의 검수가 이어집니다. 파일당 25MB, 총 50MB · 5개까지.</span><div className="session-actions">{chatSending && <button className="button danger" type="button" onClick={() => { if (!project) return; if (chatTaskId) void window.collab.cancelRun(project.path, chatTaskId).then(() => notify('업무 중단 요청을 보냈습니다.')).catch((error: unknown) => notify(errorText(error), true)); else void window.collab.cancelProjectMessage(project.path); }}>응답 중단</button>}<button className="button" type="button" disabled={!chatDraft.trim() || chatSending} onClick={requestChatTask}>업무로 요청</button><button className="button primary" type="submit" disabled={(!chatDraft.trim() && !chatFiles.length) || chatSending}>{chatSending ? '진행 중…' : '메시지 보내기'}</button></div></div>
+        <div className="chat-compose-actions"><span className="subtle">첨부 파일은 프로젝트 Git에 저장됩니다. 업무는 Codex만 또는 Claude만을 선택해 각각 요청하세요. 완료되면 상대 모델이 검수합니다. 파일당 25MB, 총 50MB · 5개까지.</span><div className="session-actions">{chatSending && <button className="button danger" type="button" onClick={() => project && void window.collab.cancelProjectMessage(project.path)}>응답 중단</button>}<button className="button" type="button" disabled={!chatDraft.trim() || chatSending || chatTarget === 'both'} onClick={requestChatTask}>선택한 모델에 업무 요청</button><button className="button primary" type="submit" disabled={(!chatDraft.trim() && !chatFiles.length) || chatSending}>{chatSending ? '진행 중…' : '메시지 보내기'}</button></div></div>
       </form>
     </div>
   );

@@ -3,6 +3,7 @@ export type Provider = 'codex' | 'claude';
 export type ModelChoice = Readonly<{
   provider: Provider;
   model: string;
+  effort?: string;
 }>;
 
 export type ChatModelSettings = Readonly<{ model: string; effort: string }>;
