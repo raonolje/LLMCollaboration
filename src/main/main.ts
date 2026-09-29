@@ -1,9 +1,25 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron';
 import path from 'node:path';
-import type { CollaborationEvent, Provider } from '../shared/types';
+import type { CollaborationEvent, LaunchRequest, Provider } from '../shared/types';
 import { createService } from './services';
+import { installChatSkills, parseLaunchUrl } from './chat-link';
 
 let mainWindow: BrowserWindow | null = null;
+let pendingLaunch: LaunchRequest | null = process.argv.map(parseLaunchUrl).find((item) => item !== null) ?? null;
+const receiveLaunch = (value: string): void => {
+  const request = parseLaunchUrl(value);
+  if (!request) return;
+  pendingLaunch = request;
+  mainWindow?.show();
+  mainWindow?.focus();
+  mainWindow?.webContents.send('collab:launchRequest', request);
+};
+
+const hasInstanceLock = app.requestSingleInstanceLock();
+if (!hasInstanceLock) app.quit();
+app.on('second-instance', (_event, commandLine) => commandLine.map(parseLaunchUrl).filter((item) => item !== null)
+  .forEach((item) => receiveLaunch(`llmcollaboration://new-project?provider=${item.provider}&sessionId=${item.sessionId}`)));
+app.on('open-url', (event, url) => { event.preventDefault(); receiveLaunch(url); });
 
 const createWindow = (): BrowserWindow => {
   const window = new BrowserWindow({
@@ -79,11 +95,18 @@ const registerHandlers = (): void => {
   ipcMain.handle('collab:setCliExecutable', (_event, provider, filePath) => service.setCliExecutable(provider, filePath));
   ipcMain.handle('collab:refreshCliStatus', () => service.refreshCliStatus());
   ipcMain.handle('collab:createProject', (_event, input) => service.createProject(input));
-  ipcMain.handle('collab:listLocalConversations', () => service.listLocalConversations());
+  ipcMain.handle('collab:listLocalConversations', (_event, target?: LaunchRequest) => service.listLocalConversations(target));
+  ipcMain.handle('collab:consumeLaunchRequest', () => {
+    const request = pendingLaunch;
+    pendingLaunch = null;
+    return request;
+  });
+  ipcMain.handle('collab:installChatSkills', () => installChatSkills());
   ipcMain.handle('collab:importConversation', (_event, projectPath, provider, filePath) => service.importConversation(projectPath, provider, filePath));
   ipcMain.handle('collab:readImportedConversation', (_event, projectPath, conversationId) => service.readImportedConversation(projectPath, conversationId));
   ipcMain.handle('collab:readImportedConversationRaw', (_event, projectPath, conversationId) => service.readImportedConversationRaw(projectPath, conversationId));
   ipcMain.handle('collab:deleteProject', (_event, projectPath, projectId, confirmation) => service.deleteProject(projectPath, projectId, confirmation));
+  ipcMain.handle('collab:unregisterProjectOnly', (_event, projectPath, projectId, confirmation) => service.unregisterProjectOnly(projectPath, projectId, confirmation));
   ipcMain.handle('collab:forgetMissingProject', (_event, projectPath) => service.forgetMissingProject(projectPath));
   ipcMain.handle('collab:openProject', (_event, projectPath) => service.openProject(projectPath));
   ipcMain.handle('collab:updateCharter', (_event, projectPath, charter) => service.updateCharter(projectPath, charter));
@@ -116,6 +139,11 @@ const registerHandlers = (): void => {
 };
 
 void app.whenReady().then(() => {
+  if (!hasInstanceLock) return;
+  if (process.defaultApp && process.argv[1]) {
+    app.setAsDefaultProtocolClient('llmcollaboration', process.execPath, [path.resolve(process.argv[1])]);
+  } else app.setAsDefaultProtocolClient('llmcollaboration');
+  void installChatSkills().catch(() => undefined);
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null);
   registerHandlers();
   mainWindow = createWindow();

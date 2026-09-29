@@ -23,11 +23,14 @@ export type SessionTurn = Readonly<{
 export type ConversationTurn = Readonly<{ role: 'user' | 'assistant'; text: string; timestamp?: string }>;
 export type ConversationCandidate = Readonly<{
   provider: Provider;
+  sessionId: string;
   filePath: string;
   title: string;
+  cwd?: string;
   updatedAt: string;
   turnCount: number;
 }>;
+export type LaunchRequest = Readonly<{ provider: Provider; sessionId: string }>;
 export type ImportedConversation = Readonly<{
   id: string;
   provider: Provider;
@@ -156,12 +159,16 @@ export type CollaborationAPI = Readonly<{
   setCliExecutable: (provider: Provider, filePath: string | null) => Promise<CliStatus[]>;
   refreshCliStatus: () => Promise<CliStatus[]>;
   createProject: (input: ProjectInput) => Promise<ProjectSnapshot>;
-  listLocalConversations: () => Promise<ConversationCandidate[]>;
+  listLocalConversations: (target?: LaunchRequest) => Promise<ConversationCandidate[]>;
+  consumeLaunchRequest: () => Promise<LaunchRequest | null>;
+  onLaunchRequest: (listener: (request: LaunchRequest) => void) => () => void;
+  installChatSkills: () => Promise<string[]>;
   importConversation: (projectPath: string, provider: Provider, filePath: string) => Promise<ProjectSnapshot>;
   readImportedConversation: (projectPath: string, conversationId: string) => Promise<ConversationTurn[]>;
   readImportedConversationRaw: (projectPath: string, conversationId: string) => Promise<string>;
   chooseConversationFile: () => Promise<string | null>;
   deleteProject: (projectPath: string, projectId: string, confirmation: string) => Promise<'trashed' | 'unregistered'>;
+  unregisterProjectOnly: (projectPath: string, projectId: string, confirmation: string) => Promise<void>;
   forgetMissingProject: (projectPath: string) => Promise<void>;
   openProject: (projectPath: string) => Promise<ProjectSnapshot>;
   updateCharter: (projectPath: string, charter: string) => Promise<ProjectSnapshot>;

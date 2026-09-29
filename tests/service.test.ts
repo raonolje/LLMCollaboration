@@ -317,6 +317,36 @@ describe('local CLI executable settings', () => {
 });
 
 describe('project deletion', () => {
+  it('removes a registered project from the app while keeping its existing folder and Git history', () => withTemporaryWorkspace(async (workspace) => {
+    const projectPath = path.join(workspace, 'project');
+    const registryPath = path.join(workspace, 'registry.json');
+    const trashed: string[] = [];
+    const service = createService({ registryPath, emit: () => undefined, autoStartSessions: false,
+      trashItem: async (target) => { trashed.push(target); } });
+    const created = await service.createProject({ path: projectPath, name: 'Keep local files', goal: 'Remove only the app entry' });
+    const userFile = path.join(projectPath, 'keep.txt');
+    await writeFile(userFile, 'Keep this file', 'utf8');
+    await expect(service.unregisterProjectOnly(projectPath, created.project.id, 'wrong name')).rejects.toThrow('일치하지 않습니다');
+    await service.unregisterProjectOnly(projectPath, created.project.id, created.project.name);
+    expect(trashed).toEqual([]);
+    expect(await readFile(userFile, 'utf8')).toBe('Keep this file');
+    expect(await readFile(path.join(projectPath, '.llm-collaboration', 'project.json'), 'utf8')).toContain(created.project.id);
+    expect(JSON.parse(await readFile(registryPath, 'utf8'))).toEqual([]);
+  }), 30_000);
+
+  it('offers registration-only cleanup after the operating system aborts trashing an existing folder', () => withTemporaryWorkspace(async (workspace) => {
+    const projectPath = path.join(workspace, 'project');
+    const service = createService({ registryPath: path.join(workspace, 'registry.json'), emit: () => undefined,
+      autoStartSessions: false, trashItem: async () => { throw new Error('Operation was aborted'); } });
+    const created = await service.createProject({ path: projectPath, name: 'Recycle failure', goal: 'Keep the files' });
+    await expect(service.deleteProject(projectPath, created.project.id, created.project.name))
+      .rejects.toThrow('앱 목록에서만 제거');
+    expect((await service.bootstrap()).projects).toHaveLength(1);
+    await service.unregisterProjectOnly(projectPath, created.project.id, created.project.name);
+    expect((await service.bootstrap()).projects).toEqual([]);
+    expect(await readFile(path.join(projectPath, '.llm-collaboration', 'project.json'), 'utf8')).toContain(created.project.id);
+  }), 30_000);
+
   it('requires the project name and moves its folder and managed worktrees before removing the registry entry', () => withTemporaryWorkspace(async (workspace) => {
     const projectPath = path.join(workspace, 'project');
     const registryPath = path.join(workspace, 'app-data', 'registry.json');

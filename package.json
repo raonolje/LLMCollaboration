@@ -1,6 +1,6 @@
 {
   "name": "llm-collaboration",
-  "version": "0.1.5",
+  "version": "0.1.7",
   "private": true,
   "description": "구독형 CLI 기반 로컬 LLM 협업 앱",
   "main": "dist-electron/main/main.js",
@@ -37,6 +37,7 @@
   },
   "build": {
     "appId": "me.raonolje.llmcollaboration",
+    "protocols": [{ "name": "LLM Collaboration chat link", "schemes": ["llmcollaboration"] }],
     "productName": "LLM Collaboration",
     "directories": {
       "output": "release"

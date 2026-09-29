@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import type { ConversationCandidate, ConversationTurn, ImportedConversation, Provider } from '../../shared/types';
+import { DatabaseSync } from 'node:sqlite';
+import type { ConversationCandidate, ConversationTurn, ImportedConversation, LaunchRequest, Provider } from '../../shared/types';
 import { projectFiles, writeJson } from './repository';
 
 type RecordValue = Record<string, unknown>;
@@ -43,15 +44,49 @@ export const parseConversation = (provider: Provider, content: string): { sessio
 };
 
 const conversationTitle = (turns: readonly ConversationTurn[]): string =>
-  (turns.find((turn) => turn.role === 'user')?.text ?? turns[0]?.text ?? '제목 없는 대화')
+  (turns.find((turn) => turn.role === 'user' && !/^\s*<(?:environment_context|system|developer)[\s>]/iu.test(turn.text))?.text
+    ?? turns.find((turn) => turn.role === 'user')?.text ?? turns[0]?.text ?? '제목 없는 대화')
     .replace(/\s+/gu, ' ').slice(0, 100);
+
+type CodexMetadata = { id: string; title: string | null; name: string | null; cwd: string | null; rollout_path: string | null };
+const codexMetadata = (): Map<string, CodexMetadata> => {
+  try {
+    const database = new DatabaseSync(path.join(os.homedir(), '.codex', 'state_5.sqlite'), { readOnly: true });
+    try {
+      const rows = database.prepare('SELECT id, title, name, cwd, rollout_path FROM threads WHERE archived = 0').all() as CodexMetadata[];
+      return new Map(rows.map((row) => [row.id, row]));
+    } finally { database.close(); }
+  } catch { return new Map(); }
+};
+
+const metadataFromRecords = (provider: Provider, raw: string): { title?: string; cwd?: string } => {
+  if (provider !== 'claude') return {};
+  return raw.split(/\r?\n/u).reduce<{ title?: string; cwd?: string }>((previous, line) => {
+    try {
+      const record = object(JSON.parse(line) as unknown);
+      return {
+        title: record.type === 'custom-title' && string(record.customTitle).trim()
+          ? string(record.customTitle).trim() : previous.title,
+        cwd: string(record.cwd) || previous.cwd,
+      };
+    } catch { return previous; }
+  }, {});
+};
+
+const displayTitle = (name: string | undefined, fallback: string): string => {
+  const source = name?.trim() || fallback;
+  const request = source.split(/## My request:\s*/u).at(-1) ?? source;
+  return request.replace(/<environment_context>[\s\S]*?<\/environment_context>/gu, '')
+    .replace(/\s+/gu, ' ').trim().slice(0, 120) || '제목 없는 채팅';
+};
 
 const sessionRoots = (): readonly { provider: Provider; directory: string }[] => [
   { provider: 'codex', directory: path.join(os.homedir(), '.codex', 'sessions') },
   { provider: 'claude', directory: path.join(os.homedir(), '.claude', 'projects') },
 ];
 
-export const listLocalConversations = async (): Promise<ConversationCandidate[]> => {
+export const listLocalConversations = async (target?: LaunchRequest): Promise<ConversationCandidate[]> => {
+  const codexTitles = codexMetadata();
   const candidates = await Promise.all(sessionRoots().map(async ({ provider, directory }) => {
     const entries = await readdir(directory, { recursive: true, withFileTypes: true }).catch((error: unknown) => {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
@@ -65,20 +100,45 @@ export const listLocalConversations = async (): Promise<ConversationCandidate[]>
         return details && details.size > 0 && details.size <= 128 * 1024 * 1024
           ? { provider, filePath, updatedAt: details.mtime.toISOString(), size: details.size } : null;
       }));
-    return files.filter((file): file is NonNullable<typeof file> => file !== null)
-      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)).slice(0, 40);
+    const sorted = files.filter((file): file is NonNullable<typeof file> => file !== null)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    const requested = target?.provider === provider
+      ? sorted.find((file) => file.filePath.toLowerCase().includes(target.sessionId.toLowerCase())) : undefined;
+    return [...(requested ? [requested] : []), ...sorted.filter((file) => file !== requested).slice(0, 40)];
   }));
-  const recent = candidates.flat().sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)).slice(0, 60);
+  const recent = candidates.flat().sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)).slice(0, 100);
+  const requested = target ? candidates.flat().find((file) => file.provider === target.provider
+    && file.filePath.toLowerCase().includes(target.sessionId.toLowerCase())) : undefined;
+  if (requested && !recent.includes(requested)) recent.unshift(requested);
   return recent.reduce<Promise<ConversationCandidate[]>>(async (previous, file) => {
     const collected = await previous;
     try {
-      const { turns } = parseConversation(file.provider, await readFile(file.filePath, 'utf8'));
-      return turns.length ? [...collected, {
+      const raw = await readFile(file.filePath, 'utf8');
+      const { sessionId, turns } = parseConversation(file.provider, raw);
+      if (!sessionId || !turns.length || collected.some((item) => item.provider === file.provider && item.sessionId === sessionId)) return collected;
+      const codex = file.provider === 'codex' ? codexTitles.get(sessionId) : undefined;
+      const claude = metadataFromRecords(file.provider, raw);
+      return [...collected, {
         provider: file.provider, filePath: file.filePath, updatedAt: file.updatedAt,
-        title: conversationTitle(turns), turnCount: turns.length,
-      }] : collected;
+        sessionId, cwd: (codex?.cwd ?? claude.cwd)?.replace(/^\\\\\?\\/u, ''),
+        title: displayTitle(codex?.name ?? claude.title ?? codex?.title ?? undefined, conversationTitle(turns)),
+        turnCount: turns.length,
+      }];
     } catch { return collected; }
-  }, Promise.resolve([]));
+  }, Promise.resolve([])).then((items) => {
+    const ordered = target
+      ? [...items.filter((item) => item.provider === target.provider && item.sessionId === target.sessionId),
+        ...items.filter((item) => item.provider !== target.provider || item.sessionId !== target.sessionId)]
+      : items;
+    const unique = ordered.reduce<{ seen: Set<string>; values: ConversationCandidate[] }>((acc, item) => {
+      const key = `${item.provider}\0${item.cwd ?? ''}\0${item.title}`;
+      if (acc.seen.has(key)) return acc;
+      acc.seen.add(key);
+      acc.values.push(item);
+      return acc;
+    }, { seen: new Set<string>(), values: [] });
+    return unique.values.slice(0, 60);
+  });
 };
 
 export const importConversationFile = async (projectPath: string, provider: Provider, filePath: string): Promise<ImportedConversation> => {
@@ -95,7 +155,11 @@ export const importConversationFile = async (projectPath: string, provider: Prov
   await mkdir(importDirectory(projectPath), { recursive: true });
   await writeFile(importedFile(projectPath, id, 'jsonl'), raw, 'utf8');
   await writeJson(importedFile(projectPath, id, 'json'), turns);
-  return { id, provider, sessionId, title: conversationTitle(turns), importedAt: new Date().toISOString(),
+  const codex = provider === 'codex' ? codexMetadata().get(sessionId) : undefined;
+  const claude = metadataFromRecords(provider, raw);
+  return { id, provider, sessionId,
+    title: displayTitle(codex?.name ?? claude.title ?? codex?.title ?? undefined, conversationTitle(turns)),
+    importedAt: new Date().toISOString(),
     updatedAt: details.mtime.toISOString(), turnCount: turns.length };
 };
 

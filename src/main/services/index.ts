@@ -43,7 +43,7 @@ import {
 } from './repository';
 import { conversationContext, importConversationFile, listLocalConversations, readImportedRaw, readImportedTurns } from './conversation-import';
 
-export type Service = Omit<CollaborationAPI, 'chooseDirectory' | 'chooseCliExecutable' | 'chooseConversationFile' | 'onEvent' | 'openDesktopSession'>;
+export type Service = Omit<CollaborationAPI, 'chooseDirectory' | 'chooseCliExecutable' | 'chooseConversationFile' | 'onEvent' | 'openDesktopSession' | 'consumeLaunchRequest' | 'onLaunchRequest' | 'installChatSkills'>;
 
 export type ServiceOptions = Readonly<{
   registryPath: string;
@@ -627,7 +627,11 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
         const trashExisting = async (target: string): Promise<void> => {
           if (await directoryMissing(target)) return;
           try { await trashItem(target); }
-          catch (error) { if (!await directoryMissing(target)) throw error; }
+          catch (error) {
+            if (!await directoryMissing(target)) {
+              throw new Error(`휴지통 이동에 실패했습니다: ${target}. ${errorText(error)}. 폴더를 보존하려면 '앱 목록에서만 제거'를 선택하세요.`);
+            }
+          }
         };
         try {
           const project = await readProject(resolved);
@@ -661,6 +665,26 @@ export const createService = ({ registryPath, emit, runModel = runCli, autoStart
           await unregisterProject(resolved);
           return 'unregistered' as const;
         }
+      });
+    },
+
+    unregisterProjectOnly: async (projectPath: string, projectId: string, confirmation: string): Promise<void> => {
+      const resolved = path.resolve(projectPath);
+      await withLock(`delete:${resolved}`, async () => {
+        if (!(await readRegisteredPaths()).some((candidate) => samePath(candidate, resolved))) {
+          throw new Error('등록된 프로젝트가 아닙니다.');
+        }
+        if (Array.from(active.keys()).some((runKey) => runKey.startsWith(`${resolved}::`))) {
+          throw new Error('진행 중인 업무가 있습니다. 업무가 끝난 뒤 프로젝트를 정리하세요.');
+        }
+        if (!projectId.trim() || !confirmation.trim()) throw new Error('프로젝트 삭제 확인 정보가 없습니다.');
+        if (!await projectRecordMissing(resolved)) {
+          const project = await readProject(resolved);
+          if (project.id !== projectId || !samePath(project.path, resolved) || confirmation !== project.name) {
+            throw new Error('프로젝트 이름 또는 식별자가 일치하지 않습니다.');
+          }
+        }
+        await unregisterProject(resolved);
       });
     },
 

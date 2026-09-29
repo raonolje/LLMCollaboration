@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { CollaborationAPI, CollaborationEvent } from '../shared/types';
+import type { CollaborationAPI, CollaborationEvent, LaunchRequest } from '../shared/types';
 
 const invoke = <T>(channel: string, ...args: unknown[]): Promise<T> => ipcRenderer.invoke(channel, ...args) as Promise<T>;
 
@@ -10,12 +10,20 @@ const api: CollaborationAPI = {
   setCliExecutable: (provider, filePath) => invoke('collab:setCliExecutable', provider, filePath),
   refreshCliStatus: () => invoke('collab:refreshCliStatus'),
   createProject: (input) => invoke('collab:createProject', input),
-  listLocalConversations: () => invoke('collab:listLocalConversations'),
+  listLocalConversations: (target) => invoke('collab:listLocalConversations', target),
+  consumeLaunchRequest: () => invoke('collab:consumeLaunchRequest'),
+  installChatSkills: () => invoke('collab:installChatSkills'),
+  onLaunchRequest: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, value: LaunchRequest): void => listener(value);
+    ipcRenderer.on('collab:launchRequest', handler);
+    return () => ipcRenderer.removeListener('collab:launchRequest', handler);
+  },
   chooseConversationFile: () => invoke('collab:chooseConversationFile'),
   importConversation: (projectPath, provider, filePath) => invoke('collab:importConversation', projectPath, provider, filePath),
   readImportedConversation: (projectPath, conversationId) => invoke('collab:readImportedConversation', projectPath, conversationId),
   readImportedConversationRaw: (projectPath, conversationId) => invoke('collab:readImportedConversationRaw', projectPath, conversationId),
   deleteProject: (projectPath, projectId, confirmation) => invoke('collab:deleteProject', projectPath, projectId, confirmation),
+  unregisterProjectOnly: (projectPath, projectId, confirmation) => invoke('collab:unregisterProjectOnly', projectPath, projectId, confirmation),
   forgetMissingProject: (projectPath) => invoke('collab:forgetMissingProject', projectPath),
   openProject: (projectPath) => invoke('collab:openProject', projectPath),
   updateCharter: (projectPath, charter) => invoke('collab:updateCharter', projectPath, charter),

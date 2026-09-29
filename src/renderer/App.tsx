@@ -9,6 +9,7 @@ import type {
   EventType,
   ModelChoice,
   ImportedConversation,
+  LaunchRequest,
   Project,
   ProjectInput,
   ProjectSnapshot,
@@ -107,7 +108,7 @@ function ConversationPicker({ candidates, selected, manualPath, manualProvider, 
   onProviderChange: (value: Provider) => void;
   onChooseFile: () => void;
 }) {
-  return <div className="form-stack"><div className="import-candidates">{candidates.length ? candidates.map((candidate) => <button type="button" key={candidate.filePath} title={candidate.filePath} className={'import-candidate ' + (selected?.filePath === candidate.filePath ? 'selected' : '')} onClick={() => onSelect(candidate)}><span className={'model-chip ' + candidate.provider}>{providerLabel(candidate.provider)}</span><strong>{candidate.title}</strong><small>{candidate.turnCount}개 발화 · {shortTime(candidate.updatedAt)}</small></button>) : <div className="session-empty">{busy ? '대화를 찾고 있습니다…' : '자동으로 찾은 대화가 없습니다. JSONL 파일을 직접 선택할 수 있습니다.'}</div>}</div><div className="field"><label>JSONL 파일 직접 선택</label><div className="search-box"><input value={manualPath} onChange={(event) => onManualChange(event.target.value)} placeholder="Codex 또는 Claude 대화 파일 경로" /><button className="button" type="button" onClick={onChooseFile}>파일 선택</button></div><select aria-label="직접 선택한 대화의 모델" value={manualProvider} onChange={(event) => onProviderChange(event.target.value as Provider)}><option value="codex">Codex</option><option value="claude">Claude</option></select></div></div>;
+  return <div className="form-stack"><div className="import-candidates">{candidates.length ? candidates.map((candidate) => <button type="button" key={`${candidate.provider}:${candidate.sessionId}`} title={`${candidate.title}\n${candidate.cwd ?? ''}\n${candidate.sessionId}`} className={'import-candidate ' + (selected?.sessionId === candidate.sessionId && selected.provider === candidate.provider ? 'selected' : '')} onClick={() => onSelect(candidate)}><span className={'model-chip ' + candidate.provider}>{providerLabel(candidate.provider)}</span><strong>{candidate.title}</strong><small>{candidate.cwd ? `${candidate.cwd} · ` : ''}{candidate.turnCount}개 발화 · {shortTime(candidate.updatedAt)} · {candidate.sessionId.slice(0, 8)}</small></button>) : <div className="session-empty">{busy ? '채팅 목록을 찾고 있습니다…' : '자동으로 찾은 채팅이 없습니다. JSONL 파일을 직접 선택할 수 있습니다.'}</div>}</div><div className="field"><label>JSONL 파일 직접 선택</label><div className="search-box"><input value={manualPath} onChange={(event) => onManualChange(event.target.value)} placeholder="Codex 또는 Claude 대화 파일 경로" /><button className="button" type="button" onClick={onChooseFile}>파일 선택</button></div><select aria-label="직접 선택한 대화의 모델" value={manualProvider} onChange={(event) => onProviderChange(event.target.value as Provider)}><option value="codex">Codex</option><option value="claude">Claude</option></select></div></div>;
 }
 
 export default function App() {
@@ -208,6 +209,22 @@ export default function App() {
   }), []);
 
   useEffect(() => {
+    const openLinkedChat = async (request: LaunchRequest): Promise<void> => {
+      const candidates = await window.collab.listLocalConversations(request);
+      const matching = candidates.find((item) => item.provider === request.provider && item.sessionId === request.sessionId);
+      setLocalConversations(candidates);
+      setSelectedConversation(matching ?? null);
+      setManualConversationPath('');
+      setProjectDraft(defaultProject);
+      setDialog('project');
+      if (!matching) notify('현재 채팅을 로컬 기록에서 찾지 못했습니다. 채팅 목록 또는 JSONL 파일을 선택해 주세요.', true);
+    };
+    const unsubscribe = window.collab.onLaunchRequest((request) => { void openLinkedChat(request); });
+    void window.collab.consumeLaunchRequest().then((request) => request && openLinkedChat(request));
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
     setCharterDraft(project?.charter ?? '');
     setRoundDraft(project?.defaultDebateRounds ?? 2);
   }, [project?.path, project?.charter, project?.defaultDebateRounds]);
@@ -219,18 +236,33 @@ export default function App() {
     });
   };
 
+  const removeProjectFromView = (removed: Project, message: string): void => {
+    setProjects((previous) => previous.filter((item) => item.id !== removed.id));
+    setBootstrap((previous) => previous && ({ ...previous, projects: previous.projects.filter((item) => item.id !== removed.id) }));
+    setSnapshot(null);
+    setDialog(null);
+    setDeleteConfirmation('');
+    setTab('overview');
+    notify(message);
+  };
+
   const deleteCurrentProject = (): void => {
     if (!project || deleteConfirmation !== project.name || runningTaskIds.size > 0) return;
     const removed = project;
     void perform('프로젝트 삭제 중', async () => {
       const result = await window.collab.deleteProject(removed.path, removed.id, deleteConfirmation);
-      setProjects((previous) => previous.filter((item) => item.id !== removed.id));
-      setBootstrap((previous) => previous && ({ ...previous, projects: previous.projects.filter((item) => item.id !== removed.id) }));
-      setSnapshot(null);
-      setDialog(null);
-      setDeleteConfirmation('');
-      setTab('overview');
-      notify(result === 'trashed' ? `${removed.name} 프로젝트 폴더를 휴지통으로 이동했습니다.` : `${removed.name} 프로젝트 등록을 목록에서 제거했습니다.`);
+      removeProjectFromView(removed, result === 'trashed'
+        ? `${removed.name} 프로젝트 폴더를 휴지통으로 이동했습니다.`
+        : `${removed.name} 프로젝트 등록을 목록에서 제거했습니다.`);
+    });
+  };
+
+  const unregisterCurrentProject = (): void => {
+    if (!project || deleteConfirmation !== project.name || runningTaskIds.size > 0) return;
+    const removed = project;
+    void perform('프로젝트 등록 제거 중', async () => {
+      await window.collab.unregisterProjectOnly(removed.path, removed.id, deleteConfirmation);
+      removeProjectFromView(removed, `${removed.name} 프로젝트를 앱 목록에서 제거했습니다. 로컬 폴더는 그대로 둡니다.`);
     });
   };
 
@@ -754,10 +786,10 @@ export default function App() {
       <div className="field"><label htmlFor="project-folder">프로젝트 폴더</label><div className="search-box"><input id="project-folder" required value={projectDraft.path} onChange={(event) => setProjectDraft((previous) => ({ ...previous, path: event.target.value }))} placeholder="절대 경로" /><button className="button" type="button" onClick={chooseDirectory}>폴더 선택</button></div><span>기존 폴더를 선택하거나 새 폴더 경로를 입력할 수 있습니다.</span></div>
       <div className="field"><label htmlFor="project-goal">프로젝트 목표</label><textarea id="project-goal" value={projectDraft.goal} onChange={(event) => setProjectDraft((previous) => ({ ...previous, goal: event.target.value }))} placeholder="이 프로젝트에서 달성할 결과를 적어 주세요." /></div>
       <div className="field"><label htmlFor="project-rounds">기본 토론 왕복 횟수</label><input id="project-rounds" type="number" min={1} max={8} value={projectDraft.defaultDebateRounds ?? 2} onChange={(event) => setProjectDraft((previous) => ({ ...previous, defaultDebateRounds: Number(event.target.value) }))} /><span>기본값은 2회이며 프로젝트와 업무마다 조정할 수 있습니다.</span></div>
-      <div className="field"><label>기존 Codex·Claude 채팅에서 시작 (선택)</label><span>혼자 진행하던 대화를 가져오면 두 모델의 프로젝트 시작 대화에 기존 맥락을 전달합니다. 기존 작업 폴더를 위에서 선택하세요.</span><ConversationPicker candidates={localConversations} selected={selectedConversation} manualPath={manualConversationPath} manualProvider={manualConversationProvider} busy={!!busy} onSelect={(candidate) => { setSelectedConversation(candidate); setManualConversationPath(''); }} onManualChange={(value) => { setManualConversationPath(value); setSelectedConversation(null); }} onProviderChange={setManualConversationProvider} onChooseFile={chooseConversationFile} /></div>
+      <div className="field"><label>기존 Codex·Claude 채팅에서 시작 (선택)</label><span>채팅 제목과 작업 폴더로 찾거나, Codex·Claude Code 채팅에서 “LLM콜라보레이션 하자”라고 요청해 이 창을 열 수 있습니다.</span><button className="button small" type="button" onClick={() => void perform('채팅 연결 설정 중', async () => { await window.collab.installChatSkills(); notify('채팅 연결을 설치했습니다. Codex·Claude Code에서 새 채팅을 열거나 스킬을 다시 불러와 주세요.'); })}>채팅 연결 설치·복구</button><ConversationPicker candidates={localConversations} selected={selectedConversation} manualPath={manualConversationPath} manualProvider={manualConversationProvider} busy={!!busy} onSelect={(candidate) => { setSelectedConversation(candidate); setManualConversationPath(''); }} onManualChange={(value) => { setManualConversationPath(value); setSelectedConversation(null); }} onProviderChange={setManualConversationProvider} onChooseFile={chooseConversationFile} /></div>
       <div className="form-actions"><button className="button" type="button" onClick={() => setDialog(null)}>취소</button><button className="button primary" type="submit" disabled={!!busy}>프로젝트 만들기</button></div>
     </form></div></div>}
-    {dialog === 'delete-project' && project && <div className="modal-backdrop"><div className="modal" role="dialog" aria-modal="true" aria-label="프로젝트 삭제 확인"><div className="modal-header"><div><h2>프로젝트 삭제</h2><p className="subtle">프로젝트 폴더와 앱이 만든 작업용 폴더를 휴지통으로 이동합니다.</p></div><button className="close" aria-label="닫기" disabled={!!busy} onClick={() => setDialog(null)}>×</button></div><div className="modal-body form-stack"><div className="note"><strong>삭제할 프로젝트</strong><br />{project.name}</div><div className="folder-line">{project.path}</div><div className="field"><label htmlFor="delete-project-name">확인하려면 프로젝트 이름을 그대로 입력하세요</label><input id="delete-project-name" autoComplete="off" value={deleteConfirmation} onChange={(event) => setDeleteConfirmation(event.target.value)} placeholder={project.name} /></div><div className="form-actions"><button className="button" type="button" disabled={!!busy} onClick={() => setDialog(null)}>취소</button><button className="button danger" type="button" disabled={!!busy || deleteConfirmation !== project.name || runningTaskIds.size > 0} onClick={deleteCurrentProject}>폴더와 프로젝트 삭제</button></div></div></div></div>}
+    {dialog === 'delete-project' && project && <div className="modal-backdrop"><div className="modal" role="dialog" aria-modal="true" aria-label="프로젝트 삭제 확인"><div className="modal-header"><div><h2>프로젝트 삭제</h2><p className="subtle">앱 목록에서만 제거하거나 폴더까지 휴지통으로 이동할 수 있습니다.</p></div><button className="close" aria-label="닫기" disabled={!!busy} onClick={() => setDialog(null)}>×</button></div><div className="modal-body form-stack"><div className="note"><strong>삭제할 프로젝트</strong><br />{project.name}</div><div className="folder-line" title={project.path}>{project.path}</div><div className="field"><label htmlFor="delete-project-name">확인하려면 프로젝트 이름을 그대로 입력하세요</label><input id="delete-project-name" autoComplete="off" value={deleteConfirmation} onChange={(event) => setDeleteConfirmation(event.target.value)} placeholder={project.name} /></div><p className="subtle">앱 목록에서만 제거하면 위 경로의 폴더와 Git 기록은 그대로 남습니다.</p><div className="form-actions"><button className="button" type="button" disabled={!!busy} onClick={() => setDialog(null)}>취소</button><button className="button" type="button" disabled={!!busy || deleteConfirmation !== project.name || runningTaskIds.size > 0} onClick={unregisterCurrentProject}>앱 목록에서만 제거</button><button className="button danger" type="button" disabled={!!busy || deleteConfirmation !== project.name || runningTaskIds.size > 0} onClick={deleteCurrentProject}>폴더도 휴지통으로 이동</button></div></div></div></div>}
     {dialog === 'import-conversation' && project && <div className="modal-backdrop"><div className="modal import-modal" role="dialog" aria-modal="true" aria-label="기존 대화 가져오기"><div className="modal-header"><div><h2>Codex·Claude 대화 가져오기</h2><p className="subtle">로컬 대화를 골라 현재 프로젝트에 사본을 저장합니다.</p></div><button className="close" aria-label="닫기" disabled={!!busy} onClick={() => setDialog(null)}>×</button></div><div className="modal-body form-stack"><ConversationPicker candidates={localConversations} selected={selectedConversation} manualPath={manualConversationPath} manualProvider={manualConversationProvider} busy={!!busy} onSelect={(candidate) => { setSelectedConversation(candidate); setManualConversationPath(''); }} onManualChange={(value) => { setManualConversationPath(value); setSelectedConversation(null); }} onProviderChange={setManualConversationProvider} onChooseFile={chooseConversationFile} /><p className="subtle">선택한 시점의 대화 원문을 프로젝트 Git에 복사합니다. 이후 원래 채팅과 자동 동기화되지는 않습니다.</p><div className="form-actions"><button className="button" type="button" disabled={!!busy} onClick={() => setDialog(null)}>취소</button><button className="button primary" type="button" disabled={!!busy || !(selectedConversation || manualConversationPath)} onClick={importSelectedConversation}>대화 가져오기</button></div></div></div></div>}
     {dialog === 'imported-history' && importedHistory && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setDialog(null)}><div className="modal session-history-modal" role="dialog" aria-modal="true" aria-label="가져온 모델 대화"><div className="modal-header"><div><h2>{providerLabel(importedHistory.conversation.provider)}에서 가져온 대화</h2><p className="subtle">{importedHistory.conversation.title}</p></div><button className="close" aria-label="닫기" onClick={() => setDialog(null)}>×</button></div><div className="modal-body"><div className="session-turn-head"><p className="subtle session-history-note">{importedHistory.turns.length}개 발화 · 프로젝트 Git에 원문 JSONL이 저장되어 있습니다.</p><button className="button small" type="button" onClick={() => viewImportedRaw(importedHistory.conversation)}>원본 JSONL 보기</button></div>{importedHistory.turns.map((turn, index) => <article className="session-turn" key={index}><div className="session-turn-head"><span className="badge neutral">{turn.role === 'user' ? '사용자' : providerLabel(importedHistory.conversation.provider)}</span>{turn.timestamp && <span className="activity-time">{shortTime(turn.timestamp)}</span>}</div><div className="session-response">{turn.text}</div></article>)}</div></div></div>}
     {dialog === 'task' && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setDialog(null)}><div className="modal" role="dialog" aria-modal="true" aria-label={editingTask ? '업무 편집' : '업무 만들기'}><div className="modal-header"><div><h2>{editingTask ? '업무 편집' : '새 업무'}</h2><p className="subtle">완료 기준과 모델별 역할을 명확히 지정합니다.</p></div><button className="close" aria-label="닫기" onClick={() => setDialog(null)}>×</button></div><form className="modal-body form-stack" onSubmit={submitTask}>
