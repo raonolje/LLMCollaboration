@@ -49,7 +49,7 @@ const tailnetAddress = (): string | undefined => Object.entries(networkInterface
   .find((address) => address.family === 'IPv4' && !address.internal)?.address;
 const message = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
-export const createRemote = (service: Service, userData: string, options: { address?: string; port?: number } = {}) => {
+export const createRemote = (service: Service, userData: string, options: { address?: string; port?: number; webRoot?: string } = {}) => {
   const settingsFile = path.join(userData, 'remote-settings.json');
   let server: Server | null = null;
   let boundAddress: string | undefined;
@@ -85,9 +85,32 @@ export const createRemote = (service: Service, userData: string, options: { addr
     return operation;
   };
   const handle = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
-    if (!authorized(request, (await readSettings()).token)) { json(response, 401, { error: '연결 코드가 올바르지 않습니다.' }); return; }
     try {
       const url = new URL(request.url ?? '/', 'http://localhost');
+      if (request.method === 'GET' && !url.pathname.startsWith('/v1/') && options.webRoot) {
+        const root = path.resolve(options.webRoot);
+        const relative = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname);
+        const file = path.resolve(root, `.${relative}`);
+        if (!file.startsWith(`${root}${path.sep}`)) { json(response, 404, { error: '파일을 찾을 수 없습니다.' }); return; }
+        const content = await readFile(file).catch((error: unknown) => {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+          throw error;
+        });
+        if (!content) { json(response, 404, { error: '파일을 찾을 수 없습니다.' }); return; }
+        const mime = file.endsWith('.html') ? 'text/html; charset=utf-8'
+          : file.endsWith('.js') ? 'text/javascript; charset=utf-8'
+            : file.endsWith('.css') ? 'text/css; charset=utf-8'
+              : file.endsWith('.png') ? 'image/png'
+                : file.endsWith('.ico') ? 'image/x-icon'
+                  : file.endsWith('.webmanifest') ? 'application/manifest+json' : 'application/octet-stream';
+        const page = file.endsWith('index.html')
+          ? content.toString('utf8').replace('</head>', '<meta name="apple-mobile-web-app-capable" content="yes" /><meta name="apple-mobile-web-app-title" content="LLM Collaboration" /><link rel="apple-touch-icon" href="/apple-touch-icon.png" /><link rel="manifest" href="/manifest.webmanifest" /></head>')
+          : content;
+        response.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'DENY' });
+        response.end(page);
+        return;
+      }
+      if (!authorized(request, (await readSettings()).token)) { json(response, 401, { error: '연결 코드가 올바르지 않습니다.' }); return; }
       const segments = url.pathname.split('/').filter(Boolean);
       if (request.method === 'GET' && url.pathname === '/v1/health') { json(response, 200, { ok: true, version: 1 }); return; }
       if (request.method === 'GET' && url.pathname === '/v1/projects') {
@@ -171,7 +194,8 @@ export const createRemote = (service: Service, userData: string, options: { addr
     setEnabled: async (enabled: boolean): Promise<RemoteStatus> => {
       const current = await readSettings();
       await save({ ...current, enabled });
-      if (enabled) await start(); else { await stop(); lastError = undefined; }
+      if (enabled && (!server || boundAddress !== (options.address ?? tailnetAddress()))) await start();
+      if (!enabled) { await stop(); lastError = undefined; }
       return status();
     },
     rotateToken: async (): Promise<RemoteStatus> => {

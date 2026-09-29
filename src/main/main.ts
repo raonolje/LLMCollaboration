@@ -71,7 +71,7 @@ const registerHandlers = (): void => {
     emit: (event: CollaborationEvent) => mainWindow?.webContents.send('collab:event', event),
     trashItem: trashItemWithFallback,
   });
-  const remote = createRemote(service, app.getPath('userData'));
+  const remote = createRemote(service, app.getPath('userData'), { webRoot: path.join(app.getAppPath(), 'mobile', 'web-dist') });
   closeRemote = remote.close;
   void remote.initialize();
 

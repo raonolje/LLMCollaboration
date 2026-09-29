@@ -1,0 +1,11 @@
+{
+  "name": "LLM Collaboration",
+  "short_name": "Collaboration",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f1932",
+  "theme_color": "#0f1932",
+  "icons": [
+    { "src": "/apple-touch-icon.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

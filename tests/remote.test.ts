@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -12,16 +12,25 @@ describe('remote companion', () => {
   it('requires the pairing token and resolves only registered project IDs', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'collab-remote-'));
     directories.push(directory);
+    const webRoot = path.join(directory, 'web');
+    await mkdir(webRoot);
+    await writeFile(path.join(webRoot, 'index.html'), '<head></head><h1>Mobile connection</h1>');
     const sendProjectMessage = vi.fn(async () => ({ project: { id: 'project-1' }, tasks: [], events: [] }));
     const service = {
       listProjects: async () => [{ id: 'project-1', name: 'Project', path: directory }],
       openProject: async () => ({ project: { id: 'project-1', name: 'Project', path: directory }, tasks: [], events: [] }),
       sendProjectMessage,
     } as unknown as Service;
-    const remote = createRemote(service, directory, { address: '127.0.0.1', port: 0 });
+    const remote = createRemote(service, directory, { address: '127.0.0.1', port: 0, webRoot });
     try {
       const status = await remote.setEnabled(true);
       expect(status.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/u);
+      const page = await fetch(`${status.url}/`);
+      expect(page.status).toBe(200);
+      const html = await page.text();
+      expect(html).toContain('Mobile connection');
+      expect(html).toContain('/manifest.webmanifest');
+      expect((await fetch(`${status.url}/remote-settings.json`)).status).toBe(404);
       const unauthorized = await fetch(`${status.url}/v1/projects`);
       expect(unauthorized.status).toBe(401);
       const headers = { Authorization: `Bearer ${status.token}` };

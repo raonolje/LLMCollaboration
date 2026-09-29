@@ -9,5 +9,6 @@ dist/
 coverage/
 release/
 mobile/export/
+mobile/web-dist/
 mobile/.expo/
 work/

@@ -1,4 +1,5 @@
 import * as SecureStore from 'expo-secure-store';
+import { Platform } from 'react-native';
 
 export type Provider = 'codex' | 'claude';
 export type Target = Provider | 'both';
@@ -11,11 +12,23 @@ export type Connection = { url: string; token: string };
 const storageKey = 'llm-collaboration-connection';
 
 export const loadConnection = async (): Promise<Connection | null> => {
-  const saved = await SecureStore.getItemAsync(storageKey);
+  if (Platform.OS === 'web') {
+    const token = new URLSearchParams(window.location.hash.slice(1)).get('pair');
+    if (token && /^[a-f0-9]{64}$/u.test(token)) {
+      const connection = { url: window.location.origin, token };
+      window.localStorage.setItem(storageKey, JSON.stringify(connection));
+      window.history.replaceState(null, '', window.location.pathname);
+      return connection;
+    }
+  }
+  const saved = Platform.OS === 'web' ? window.localStorage.getItem(storageKey) : await SecureStore.getItemAsync(storageKey);
   return saved ? JSON.parse(saved) as Connection : null;
 };
 export const saveConnection = async (connection: Connection | null): Promise<void> => {
-  if (connection) await SecureStore.setItemAsync(storageKey, JSON.stringify(connection));
+  if (Platform.OS === 'web') {
+    if (connection) window.localStorage.setItem(storageKey, JSON.stringify(connection));
+    else window.localStorage.removeItem(storageKey);
+  } else if (connection) await SecureStore.setItemAsync(storageKey, JSON.stringify(connection));
   else await SecureStore.deleteItemAsync(storageKey);
 };
 export const request = async <T>(connection: Connection, route: string, body?: unknown): Promise<T> => {

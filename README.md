@@ -60,9 +60,9 @@ npm run package:mac  # macOS: DMG와 ZIP
 
 ## iPhone 원격 연결
 
-데스크톱 앱 상단 **아이폰 원격 연결**에서 원격 연결을 켭니다. Windows 또는 macOS PC와 iPhone에 [Tailscale](https://tailscale.com/download)을 설치하고 같은 tailnet에 로그인해야 합니다. 앱이 Tailscale 네트워크 인터페이스에만 서버를 열고, 주소(`http://100.x.y.z:48721`)와 임의 생성한 연결 코드를 표시합니다. 인터넷 공유기 포트 개방이나 별도 LLM API 키는 필요하지 않습니다. 데스크톱 앱과 PC가 켜져 있어야 원격 작업을 실행할 수 있습니다.
+Windows 또는 macOS PC와 iPhone에 [Tailscale](https://tailscale.com/download)을 설치하고 같은 tailnet에 로그인합니다. 데스크톱 앱 상단의 **모바일 연결**을 누르면 Tailscale 인터페이스에 모바일 화면과 작업 서버를 자동으로 열고 QR 코드를 표시합니다. 아이폰 카메라로 QR을 스캔해 Safari에서 열면 연결 코드가 자동 입력됩니다. Safari의 **공유 → 홈 화면에 추가**로 아이콘을 만들 수 있습니다. 평소 사용에는 Node.js, PowerShell 명령, Expo Go, Expo 계정이 필요하지 않습니다. 데스크톱 앱과 PC가 켜져 있어야 원격 작업을 실행할 수 있습니다.
 
-아이폰 앱 소스는 `mobile/`에 있습니다. 개발 중 실기기 확인은 다음 명령으로 Expo를 실행하고 iPhone의 Expo Go로 열 수 있습니다. [Expo 개발 안내](https://docs.expo.dev/get-started/start-developing/)에 따라 물리적 iPhone에서는 Expo CLI와 Expo Go를 같은 Expo 계정으로 로그인해야 합니다. 정식 독립 앱의 TestFlight·App Store 배포에는 Apple 개발자 계정과 iOS 코드 서명이 필요합니다. 이 저장소에는 아직 서명된 IPA가 없습니다.
+아이폰 화면 소스는 `mobile/`에 있습니다. 저장소 개발자는 Expo Go로도 화면을 시험할 수 있습니다. 정식 독립 앱의 TestFlight·App Store 배포에는 Apple 개발자 계정과 iOS 코드 서명이 필요합니다. 이 저장소에는 아직 서명된 IPA가 없습니다.
 
 ```sh
 cd mobile
@@ -72,7 +72,7 @@ npx expo start
 
 Apple 개발자 계정과 Expo EAS 계정을 연결한 뒤에는 `mobile/eas.json`의 `preview` 또는 `production` 프로필로 iOS 설치 빌드를 만들 수 있습니다. 현재 자동 빌드는 iOS JavaScript 번들까지만 검증하며, 실기기 설치·Tailscale 연결은 별도로 확인해야 합니다.
 
-아이폰 앱에 데스크톱 화면의 주소와 연결 코드를 입력하면 프로젝트 목록, Codex·Claude 대화, 업무 상태를 읽을 수 있습니다. 양쪽 또는 한 모델에 메시지를 보내고, 실제 모델 목록과 추론 수준을 선택하며, 업무 계획·토론·실행·중단·추가 토론을 요청할 수 있습니다. 아이폰은 5초마다 진행 상황을 갱신합니다. 연결 코드는 iPhone SecureStore에 보관하고, 프로젝트 기록과 CLI 로그인은 데스크톱에 남습니다. 코드를 재발급하면 이전 iPhone 연결은 즉시 거부됩니다. 분실 시 데스크톱의 **원격 연결 끄기** 또는 **코드 재발급**을 사용하세요. Tailscale 내부 HTTP 연결을 사용하며 iOS 전송 보안 예외가 설정돼 있습니다. 이 주소를 공용 인터넷에 포트 포워딩하지 마세요.
+아이폰에서는 프로젝트 목록, Codex·Claude 대화, 업무 상태를 읽을 수 있습니다. 양쪽 또는 한 모델에 메시지를 보내고, 실제 모델 목록과 추론 수준을 선택하며, 업무 계획·토론·실행·중단·추가 토론을 요청할 수 있습니다. 화면은 5초마다 진행 상황을 갱신합니다. Safari 홈 화면 버전은 연결 코드를 해당 브라우저의 로컬 저장소에, Expo Go 버전은 iPhone SecureStore에 보관합니다. 프로젝트 기록과 CLI 로그인은 데스크톱에 남습니다. 코드를 재발급하면 이전 연결은 즉시 거부됩니다. 분실 시 데스크톱의 **원격 연결 끄기** 또는 **코드 재발급**을 사용하세요. Tailscale 내부 HTTP 연결을 사용하며 iOS 전송 보안 예외가 설정돼 있습니다. 이 주소를 공용 인터넷에 포트 포워딩하지 마세요.
 
 ## 사용 흐름
 
