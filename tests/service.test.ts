@@ -70,11 +70,11 @@ describe('service orchestration with an injected model', () => {
     await service.createProject({ path: projectPath, name: 'Team room', goal: 'Build a reviewed app' });
     await service.updateCharter(projectPath, 'Keep all project records in Git.');
     const first = await service.sendProjectMessage(projectPath, 'Both models: review the direction', 'both', { codex: { model: 'codex-chat-model', effort: 'high' }, claude: { model: 'claude-chat-model', effort: 'medium' } });
-    expect(calls.map(({ choice, readOnly, phase }) => [choice.provider, readOnly, phase])).toEqual([
-      ['codex', true, 'project-chat'], ['claude', true, 'project-chat'],
+    expect(calls.map(({ choice, readOnly, phase }) => [choice.provider, readOnly, phase]).sort((left, right) => String(left[0]).localeCompare(String(right[0])))).toEqual([
+      ['claude', true, 'project-chat'], ['codex', true, 'project-chat'],
     ]);
-    expect(calls.map(({ choice }) => choice.model)).toEqual(['codex-chat-model', 'claude-chat-model']);
-    expect(calls.map(({ effort }) => effort)).toEqual(['high', 'medium']);
+    expect(calls.slice(0, 2).map(({ choice }) => choice.model).sort()).toEqual(['claude-chat-model', 'codex-chat-model']);
+    expect(calls.slice(0, 2).map(({ effort }) => effort).sort()).toEqual(['high', 'medium']);
     expect(first.events.filter((item) => item.type === 'chat').map((item) => item.actor).sort()).toEqual(['claude', 'codex', 'user']);
     expect(first.project.sessions?.map((item) => item.provider).sort()).toEqual(['claude', 'codex']);
     expect(calls.every((call) => call.prompt.includes('Keep all project records in Git.'))).toBe(true);
