@@ -91,11 +91,16 @@ export default function App() {
   const chat = (provider: Provider): Event[] => (snapshot?.events ?? []).filter((event) => event.actor === provider || event.actor === 'user' && event.type === 'chat' && (event.metadata?.target === provider || event.metadata?.target === 'both')).slice(-30);
   const activity = (provider: Provider): string => {
     const running = operations.filter((operation) => operation.state === 'running' && operation.projectId === projectId);
-    const current = running.find((operation) => operation.target === provider || operation.target === 'both'
-      || !!operation.taskId && snapshot?.tasks.some((task) => task.id === operation.taskId && (task.executor.provider === provider || task.reviewer.provider === provider)));
+    const current = running.find((operation) => {
+      if (operation.kind === 'chat') return operation.target === provider || operation.target === 'both';
+      if (!operation.taskId) return false;
+      const task = snapshot?.tasks.find((item) => item.id === operation.taskId);
+      if (operation.kind === 'debate' || operation.kind === 'continue') return task?.executor.provider === provider || task?.reviewer.provider === provider;
+      return task?.status === 'reviewing' ? task.reviewer.provider === provider : task?.executor.provider === provider;
+    });
     const latest = [...(snapshot?.events ?? [])].reverse().find((event) => event.actor === provider);
     const title = snapshot?.tasks.find((task) => task.id === current?.taskId)?.title;
-    return current ? `${title ? `${title} · ` : ''}${current.kind === 'chat' ? '답변 작성 중' : current.kind === 'debate' || current.kind === 'continue' ? '토론 중' : current.kind === 'execute' ? '업무 실행·검수 중' : '작업 중'}`
+    return current ? `${title ? `${title} · ` : ''}${current.kind === 'chat' ? '답변 작성 중' : current.kind === 'debate' || current.kind === 'continue' ? '토론 중' : current.kind === 'execute' ? snapshot?.tasks.find((task) => task.id === current.taskId)?.status === 'reviewing' ? '교차 검수 중' : '구현 중' : '작업 중'}`
       : latest ? `최근 작업: ${latest.message.slice(0, 90)}` : '대기 중';
   };
   return <View style={s.root}><StatusBar barStyle="light-content" /><View style={s.header}><Text style={s.brand}>LLM Collaboration</Text><Text style={s.subtitle}>{connection ? snapshot?.project.name ?? '프로젝트 선택' : 'iPhone 원격 연결'}</Text></View>
