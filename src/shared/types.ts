@@ -178,6 +178,7 @@ export type CliStatus = Readonly<{
 export type Bootstrap = Readonly<{
   projects: Project[];
   missingProjectPaths: string[];
+  unavailableProjectPaths: ReadonlyArray<{ path: string; reason: string }>;
   cli: CliStatus[];
 }>;
 

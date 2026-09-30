@@ -301,21 +301,30 @@ export default function App() {
     applySnapshot(await window.collab.openProject(path));
   };
 
+  const reloadRegisteredProjects = async (isActive: () => boolean = () => true): Promise<void> => {
+    const result = await window.collab.bootstrap();
+    if (!isActive()) return;
+    setBootstrap(result);
+    setProjects(result.projects);
+    if (!snapshot && result.projects[0]) {
+      const next = await window.collab.openProject(result.projects[0].path);
+      if (isActive()) applySnapshot(next);
+    }
+  };
+
   useEffect(() => {
     let active = true;
-    window.collab.bootstrap()
-      .then(async (result) => {
-        if (!active) return;
-        setBootstrap(result);
-        setProjects(result.projects);
-        if (result.projects[0]) {
-          const next = await window.collab.openProject(result.projects[0].path);
-          if (active) applySnapshot(next);
-        }
-      })
-      .catch((error) => active && notify(errorText(error), true));
+    void reloadRegisteredProjects(() => active).catch((error) => active && notify(errorText(error), true));
     return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    if (!bootstrap || !bootstrap.unavailableProjectPaths.length && !bootstrap.missingProjectPaths.length) return;
+    const timer = setInterval(() => {
+      void reloadRegisteredProjects().catch((error) => notify(errorText(error), true));
+    }, 15_000);
+    return () => clearInterval(timer);
+  }, [bootstrap?.unavailableProjectPaths.length, bootstrap?.missingProjectPaths.length, project?.id]);
 
   useEffect(() => window.collab.onEvent((event) => {
     setSnapshot((current) => current && current.project.id === event.projectId &&
@@ -1135,9 +1144,10 @@ export default function App() {
     <aside className="sidebar">
       <div className="brand"><div className="brand-symbol"><img src={appIcon} alt="" /></div><span>LLM Collaboration</span></div>
       <div className="side-projects">
-        <div className="side-label">프로젝트</div>
+        <div className="side-label">프로젝트 <button className="cli-refresh" type="button" disabled={!!busy} onClick={() => void perform('프로젝트 다시 찾는 중', () => reloadRegisteredProjects())}>↻ 다시 찾기</button></div>
         {projects.map((item) => <button key={item.path} className={'project-item ' + (project?.path === item.path ? 'active' : '')} onClick={() => openProject(item)}><span className="project-dot" /><span className="project-name">{item.name}</span></button>)}
-        {bootstrap?.missingProjectPaths.map((projectPath) => <div className="missing-project" key={projectPath}><span title={projectPath}>폴더/기록 없음 · {projectPath}</span><button type="button" disabled={!!busy} onClick={() => forgetMissingProject(projectPath)}>등록만 제거</button></div>)}
+        {bootstrap?.missingProjectPaths.map((projectPath) => <div className="missing-project" key={projectPath}><span title={projectPath}>폴더/기록 확인 필요 · {projectPath}</span><button type="button" disabled={!!busy} onClick={() => void perform('프로젝트 다시 찾는 중', () => reloadRegisteredProjects())}>다시 찾기</button><button type="button" disabled={!!busy} onClick={() => forgetMissingProject(projectPath)}>등록만 제거</button></div>)}
+        {bootstrap?.unavailableProjectPaths.map((item) => <div className="missing-project" key={item.path}><span title={item.path}>프로젝트 읽기 실패 · {item.path}</span><small title={item.reason}>{item.reason}</small><button type="button" disabled={!!busy} onClick={() => void perform('프로젝트 다시 찾는 중', () => reloadRegisteredProjects())}>다시 찾기</button></div>)}
         <button className="side-action" onClick={openProjectDialog}><span className="plus">＋</span>새 프로젝트</button>
       </div>
       <div className="sidebar-bottom">
@@ -1162,7 +1172,7 @@ export default function App() {
           <div className="page-head"><div><div className="eyebrow">WORKSPACE</div><h1>{project.name}</h1><p className="subtle">{project.goal || '프로젝트 목표를 바탕으로 두 모델이 계획하고 검수합니다.'}</p></div><div className="page-actions"><button className="button danger" type="button" disabled={!!busy || runningTaskIds.size > 0} onClick={() => { setDeleteConfirmation(''); setDialog('delete-project'); }}>프로젝트 삭제</button><button className="button" onClick={() => setTab('history')}>이력 검색</button><button className="button primary" onClick={() => openTaskDialog()}>＋ 새 업무</button></div></div>
           <nav className="tabs" aria-label="프로젝트 화면"><button className={'tab ' + (tab === 'chat' ? 'active' : '')} onClick={() => setTab('chat')}>채팅</button><button className={'tab ' + (tab === 'overview' ? 'active' : '')} onClick={() => setTab('overview')}>개요</button><button className={'tab ' + (tab === 'tasks' ? 'active' : '')} onClick={() => setTab('tasks')}>업무 <span className="tab-count">{tasks.length}</span></button><button className={'tab ' + (tab === 'debate' ? 'active' : '')} onClick={() => setTab('debate')}>논쟁</button><button className={'tab ' + (tab === 'history' ? 'active' : '')} onClick={() => setTab('history')}>전체 이력</button></nav>
           {tab === 'chat' ? renderChat() : tab === 'overview' ? renderOverview() : tab === 'tasks' ? renderTasks() : tab === 'debate' ? renderDebate() : renderHistory()}
-        </> : <div className="welcome"><div className="panel welcome-card"><div className="brand-symbol"><img src={appIcon} alt="" /></div><div className="eyebrow">LOCAL FIRST WORKSPACE</div><h1>두 모델의 관점을 한곳에서</h1><p className="subtle">프로젝트 폴더를 지정하고 Codex와 Claude가 논쟁, 분업, 교차 검수를 진행하도록 설정하세요. 모든 대화와 산출물은 로컬에 보존됩니다.</p><button className="button primary" onClick={openProjectDialog}>첫 프로젝트 만들기</button></div></div>}
+        </> : <div className="welcome"><div className="panel welcome-card"><div className="brand-symbol"><img src={appIcon} alt="" /></div><div className="eyebrow">LOCAL FIRST WORKSPACE</div>{bootstrap && (bootstrap.missingProjectPaths.length || bootstrap.unavailableProjectPaths.length) ? <><h1>등록된 프로젝트를 확인하는 중</h1><p className="subtle">프로젝트 등록은 남아 있습니다. 폴더가 연결되면 자동으로 다시 읽습니다. 지금 다시 확인할 수도 있습니다.</p><button className="button primary" disabled={!!busy} onClick={() => void perform('프로젝트 다시 찾는 중', () => reloadRegisteredProjects())}>프로젝트 다시 찾기</button></> : <><h1>두 모델의 관점을 한곳에서</h1><p className="subtle">프로젝트 폴더를 지정하고 Codex와 Claude가 논쟁, 분업, 교차 검수를 진행하도록 설정하세요. 모든 대화와 산출물은 로컬에 보존됩니다.</p><button className="button primary" onClick={openProjectDialog}>첫 프로젝트 만들기</button></>}</div></div>}
       </main>
       {project && renderComposer()}
     </div>

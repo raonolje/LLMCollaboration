@@ -724,9 +724,23 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
       const projects = projectResults
         .filter((result): result is PromiseFulfilledResult<Project> => result.status === 'fulfilled')
         .map((result) => result.value);
-      const missing = await Promise.all(projectResults.map(async (result, index) =>
-        result.status === 'rejected' && await projectRecordMissing(projectPaths[index]) ? projectPaths[index] : null));
-      return { projects, missingProjectPaths: missing.filter((item): item is string => item !== null), cli: cliResults as CliStatus[] };
+      const failures = await Promise.all(projectResults.map(async (result, index) => {
+        if (result.status === 'fulfilled') return null;
+        const projectPath = projectPaths[index];
+        try {
+          if (await projectRecordMissing(projectPath)) return { path: projectPath, missing: true, reason: '' };
+        } catch (error) {
+          return { path: projectPath, missing: false, reason: errorText(error) };
+        }
+        return { path: projectPath, missing: false, reason: errorText(result.reason) };
+      }));
+      return {
+        projects,
+        missingProjectPaths: failures.filter((item) => item?.missing).map((item) => item!.path),
+        unavailableProjectPaths: failures.filter((item) => item && !item.missing)
+          .map((item) => ({ path: item!.path, reason: item!.reason })),
+        cli: cliResults as CliStatus[],
+      };
     },
 
     refreshCliStatus: cliStatuses,

@@ -568,6 +568,27 @@ describe('project deletion', () => {
     expect((await service.bootstrap()).missingProjectPaths).toEqual([]);
   }), 30_000);
 
+  it('keeps an unreadable project registered and recovers it on the next scan', () => withTemporaryWorkspace(async (workspace) => {
+    const projectPath = path.join(workspace, 'project');
+    const registryPath = path.join(workspace, 'registry.json');
+    const service = createService({ registryPath, emit: () => undefined, autoStartSessions: false });
+    const created = await service.createProject({ path: projectPath, name: 'Recover later', goal: 'Keep records' });
+    const projectFile = path.join(projectPath, '.llm-collaboration', 'project.json');
+    const original = await readFile(projectFile, 'utf8');
+    await writeFile(projectFile, '{ incomplete', 'utf8');
+
+    const unavailable = await service.bootstrap();
+    expect(unavailable.projects).toEqual([]);
+    expect(unavailable.missingProjectPaths).toEqual([]);
+    expect(unavailable.unavailableProjectPaths).toEqual([{ path: projectPath, reason: expect.any(String) }]);
+    expect(JSON.parse(await readFile(registryPath, 'utf8'))).toEqual([projectPath]);
+
+    await writeFile(projectFile, original, 'utf8');
+    const recovered = await service.bootstrap();
+    expect(recovered.projects.map((project) => project.id)).toEqual([created.project.id]);
+    expect(recovered.unavailableProjectPaths).toEqual([]);
+  }), 30_000);
+
   it('unregisters without touching an existing folder when its project record is gone', () => withTemporaryWorkspace(async (workspace) => {
     const projectPath = path.join(workspace, 'project');
     const service = createService({ registryPath: path.join(workspace, 'registry.json'), emit: () => undefined, autoStartSessions: false });
