@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ClipboardEvent, type DragEvent, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent } from 'react';
 import QRCode from 'qrcode';
 import type {
   AssignmentMode,
@@ -186,6 +186,7 @@ function ConversationPicker({ candidates, selected, manualPath, manualProvider, 
 export default function App() {
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
+  const bootstrapRequest = useRef(0);
   const [snapshot, setSnapshot] = useState<ProjectSnapshot | null>(null);
   const [tab, setTab] = useState<Tab>('chat');
   const [dialog, setDialog] = useState<Dialog>(null);
@@ -302,13 +303,14 @@ export default function App() {
   };
 
   const reloadRegisteredProjects = async (isActive: () => boolean = () => true): Promise<void> => {
+    const request = ++bootstrapRequest.current;
     const result = await window.collab.bootstrap();
-    if (!isActive()) return;
+    if (!isActive() || request !== bootstrapRequest.current) return;
     setBootstrap(result);
     setProjects(result.projects);
     if (!snapshot && result.projects[0]) {
       const next = await window.collab.openProject(result.projects[0].path);
-      if (isActive()) applySnapshot(next);
+      if (isActive() && request === bootstrapRequest.current) applySnapshot(next);
     }
   };
 
@@ -319,12 +321,15 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!bootstrap || !bootstrap.unavailableProjectPaths.length && !bootstrap.missingProjectPaths.length) return;
-    const timer = setInterval(() => {
-      void reloadRegisteredProjects().catch((error) => notify(errorText(error), true));
-    }, 15_000);
-    return () => clearInterval(timer);
-  }, [bootstrap?.unavailableProjectPaths.length, bootstrap?.missingProjectPaths.length, project?.id]);
+    if (projects.length && !bootstrap?.unavailableProjectPaths.length && !bootstrap?.missingProjectPaths.length) return;
+    let active = true;
+    const retry = (): void => {
+      void reloadRegisteredProjects(() => active).catch((error) => active && notify(errorText(error), true));
+    };
+    const timer = setInterval(retry, 15_000);
+    window.addEventListener('focus', retry);
+    return () => { active = false; clearInterval(timer); window.removeEventListener('focus', retry); };
+  }, [projects.length, bootstrap?.unavailableProjectPaths.length, bootstrap?.missingProjectPaths.length, project?.id]);
 
   useEffect(() => window.collab.onEvent((event) => {
     setSnapshot((current) => current && current.project.id === event.projectId &&
