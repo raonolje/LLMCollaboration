@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -587,6 +588,21 @@ describe('project deletion', () => {
     const recovered = await service.bootstrap();
     expect(recovered.projects.map((project) => project.id)).toEqual([created.project.id]);
     expect(recovered.unavailableProjectPaths).toEqual([]);
+  }), 30_000);
+
+  it('does not unregister a project while its Windows drive is unavailable', () => withTemporaryWorkspace(async (workspace) => {
+    if (process.platform !== 'win32') return;
+    const drive = ['Z', 'Y', 'X', 'W', 'V'].find((letter) => !existsSync(`${letter}:\\`));
+    if (!drive) return;
+    const projectPath = `${drive}:\\example-project`;
+    const registryPath = path.join(workspace, 'registry.json');
+    await writeFile(registryPath, JSON.stringify([projectPath]), 'utf8');
+    const service = createService({ registryPath, emit: () => undefined, autoStartSessions: false });
+    const result = await service.bootstrap();
+    expect(result.missingProjectPaths).toEqual([]);
+    expect(result.unavailableProjectPaths[0]?.path).toBe(projectPath);
+    await expect(service.forgetMissingProject(projectPath)).rejects.toThrow('드라이브');
+    expect(JSON.parse(await readFile(registryPath, 'utf8'))).toEqual([projectPath]);
   }), 30_000);
 
   it('unregisters without touching an existing folder when its project record is gone', () => withTemporaryWorkspace(async (workspace) => {

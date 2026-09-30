@@ -87,8 +87,11 @@ const directoryMissing = async (directory: string): Promise<boolean> =>
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
     throw error;
   });
-const projectRecordMissing = (projectPath: string): Promise<boolean> =>
-  directoryMissing(projectFiles(projectPath).project);
+const projectRecordMissing = async (projectPath: string): Promise<boolean> => {
+  const root = path.parse(path.resolve(projectPath)).root;
+  if (await directoryMissing(root)) throw new Error(`프로젝트 드라이브 또는 공유 폴더에 연결할 수 없습니다: ${root}`);
+  return directoryMissing(projectFiles(projectPath).project);
+};
 const assertSafeProjectDirectory = async (directory: string, registryPath: string): Promise<void> => {
   const home = os.homedir();
   const protectedLocations = [
