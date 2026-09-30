@@ -230,6 +230,7 @@ export default function App() {
   const [debateScope, setDebateScope] = useState<'project' | 'task'>('project');
   const [projectDiscussionId, setProjectDiscussionId] = useState('');
   const [chatModels, setChatModels] = useState<Record<Provider, ChatModelSettings>>({ codex: { model: '', effort: '' }, claude: { model: '', effort: '' } });
+  const activeModelProjectId = useRef<string | null>(null);
   const [modelCatalogs, setModelCatalogs] = useState<ModelCatalog[]>([]);
   const [modelBusy, setModelBusy] = useState(false);
   const [updateCheck, setUpdateCheck] = useState<AppUpdateCheck | null>(null);
@@ -277,6 +278,13 @@ export default function App() {
   }), [tasks]);
 
   const applySnapshot = (next: ProjectSnapshot): void => {
+    if (activeModelProjectId.current !== next.project.id) {
+      setChatModels({
+        codex: next.project.chatModels?.codex ?? { model: '', effort: '' },
+        claude: next.project.chatModels?.claude ?? { model: '', effort: '' },
+      });
+      activeModelProjectId.current = next.project.id;
+    }
     setSnapshot(next);
     setProjects((previous) => previous.some((item) => item.path === next.project.path)
       ? previous.map((item) => item.path === next.project.path ? next.project : item)
@@ -365,7 +373,19 @@ export default function App() {
     });
   };
 
+  const reconnectExistingProject = (): void => {
+    void perform('기존 프로젝트를 연결하는 중', async () => {
+      const folder = await window.collab.chooseDirectory();
+      if (!folder) return;
+      const next = await window.collab.reconnectProject(folder);
+      applySnapshot(next);
+      setTab('chat');
+      notify(`${next.project.name} 프로젝트를 다시 연결했습니다.`);
+    });
+  };
+
   const removeProjectFromView = (removed: Project, message: string): void => {
+    activeModelProjectId.current = null;
     setProjects((previous) => previous.filter((item) => item.id !== removed.id));
     setBootstrap((previous) => previous && ({ ...previous, projects: previous.projects.filter((item) => item.id !== removed.id) }));
     setSnapshot(null);
@@ -432,13 +452,14 @@ export default function App() {
     try {
       const catalogs = await window.collab.refreshModelCatalogs();
       setModelCatalogs(catalogs);
-      setChatModels((previous) => Object.fromEntries((['codex', 'claude'] as Provider[]).map((provider) => {
-        const current = previous[provider];
-        const selected = catalogs.find((catalog) => catalog.provider === provider)?.models.find((model) => model.id === current.model);
-        return [provider, selected ? { model: current.model, effort: selected.efforts.includes(current.effort) ? current.effort : '' } : { model: '', effort: '' }];
-      })) as Record<Provider, ChatModelSettings>);
     } catch (error) { notify(errorText(error), true); }
     finally { setModelBusy(false); }
+  };
+
+  const saveChatModel = (provider: Provider, settings: ChatModelSettings): void => {
+    setChatModels((current) => ({ ...current, [provider]: settings }));
+    if (project) void window.collab.updateProjectChatModel(project.path, provider, settings)
+      .catch((error: unknown) => notify(errorText(error), true));
   };
 
   const checkForUpdate = async (): Promise<void> => {
@@ -907,12 +928,12 @@ export default function App() {
           const selected = catalog?.models.find((item) => item.id === settings.model);
           const disabled = chatTarget !== 'both' && chatTarget !== provider;
           return <div className="field" key={provider}><label htmlFor={`chat-model-${provider}`}>{providerLabel(provider)} 모델</label>
-            <select id={`chat-model-${provider}`} value={settings.model} disabled={disabled || modelBusy} onChange={(event) => setChatModels((current) => ({ ...current, [provider]: { model: event.target.value, effort: '' } }))}>
-              <option value="">CLI 기본 모델</option>{catalog?.models.map((item) => <option key={item.id} value={item.id}>{item.label}{item.requiresCredits ? ' · 추가 크레딧 사용 가능성' : ''}</option>)}
+            <select id={`chat-model-${provider}`} value={settings.model} disabled={disabled || modelBusy} onChange={(event) => saveChatModel(provider, { model: event.target.value, effort: '' })}>
+              <option value="">CLI 기본 모델</option>{settings.model && !selected && <option value={settings.model}>{settings.model} · 저장된 모델 (현재 목록에 없음)</option>}{catalog?.models.map((item) => <option key={item.id} value={item.id}>{item.label}{item.requiresCredits ? ' · 추가 크레딧 사용 가능성' : ''}</option>)}
             </select>
             <label htmlFor={`chat-effort-${provider}`}>추론 수준</label>
-            <select id={`chat-effort-${provider}`} value={settings.effort} disabled={disabled || !selected} onChange={(event) => setChatModels((current) => ({ ...current, [provider]: { ...current[provider], effort: event.target.value } }))}>
-              <option value="">CLI 기본 수준</option>{selected?.efforts.map((effort) => <option key={effort} value={effort}>{effort}{selected.defaultEffort === effort ? ' · 기본값' : ''}</option>)}
+            <select id={`chat-effort-${provider}`} value={settings.effort} disabled={disabled || !selected} onChange={(event) => saveChatModel(provider, { ...chatModels[provider], effort: event.target.value })}>
+              <option value="">CLI 기본 수준</option>{settings.effort && !selected?.efforts.includes(settings.effort) && <option value={settings.effort}>{settings.effort} · 저장된 수준</option>}{selected?.efforts.map((effort) => <option key={effort} value={effort}>{effort}{selected.defaultEffort === effort ? ' · 기본값' : ''}</option>)}
             </select>
             <span>{catalog ? `${catalog.source} · ${catalog.cliVersion}` : '모델 목록을 확인하고 있습니다.'}</span>
             {catalog?.warning && <span className="chat-model-warning">{catalog.warning}</span>}
@@ -1154,6 +1175,7 @@ export default function App() {
         {bootstrap?.missingProjectPaths.map((projectPath) => <div className="missing-project" key={projectPath}><span title={projectPath}>폴더/기록 확인 필요 · {projectPath}</span><button type="button" disabled={!!busy} onClick={() => void perform('프로젝트 다시 찾는 중', () => reloadRegisteredProjects())}>다시 찾기</button><button type="button" disabled={!!busy} onClick={() => forgetMissingProject(projectPath)}>등록만 제거</button></div>)}
         {bootstrap?.unavailableProjectPaths.map((item) => <div className="missing-project" key={item.path}><span title={item.path}>프로젝트 읽기 실패 · {item.path}</span><small title={item.reason}>{item.reason}</small><button type="button" disabled={!!busy} onClick={() => void perform('프로젝트 다시 찾는 중', () => reloadRegisteredProjects())}>다시 찾기</button></div>)}
         <button className="side-action" onClick={openProjectDialog}><span className="plus">＋</span>새 프로젝트</button>
+        <button className="side-action" onClick={reconnectExistingProject}>기존 프로젝트 연결</button>
       </div>
       <div className="sidebar-bottom">
         <div className="cli-heading"><div className="side-label">로컬 CLI</div><button className="cli-refresh" type="button" onClick={() => void refreshCliStatuses()} disabled={cliBusy !== null} title="CLI 설치 및 로그인 상태 다시 확인">{cliBusy === 'refresh' ? '확인 중…' : '↻ 상태 새로고침'}</button></div>
@@ -1177,7 +1199,7 @@ export default function App() {
           <div className="page-head"><div><div className="eyebrow">WORKSPACE</div><h1>{project.name}</h1><p className="subtle">{project.goal || '프로젝트 목표를 바탕으로 두 모델이 계획하고 검수합니다.'}</p></div><div className="page-actions"><button className="button danger" type="button" disabled={!!busy || runningTaskIds.size > 0} onClick={() => { setDeleteConfirmation(''); setDialog('delete-project'); }}>프로젝트 삭제</button><button className="button" onClick={() => setTab('history')}>이력 검색</button><button className="button primary" onClick={() => openTaskDialog()}>＋ 새 업무</button></div></div>
           <nav className="tabs" aria-label="프로젝트 화면"><button className={'tab ' + (tab === 'chat' ? 'active' : '')} onClick={() => setTab('chat')}>채팅</button><button className={'tab ' + (tab === 'overview' ? 'active' : '')} onClick={() => setTab('overview')}>개요</button><button className={'tab ' + (tab === 'tasks' ? 'active' : '')} onClick={() => setTab('tasks')}>업무 <span className="tab-count">{tasks.length}</span></button><button className={'tab ' + (tab === 'debate' ? 'active' : '')} onClick={() => setTab('debate')}>논쟁</button><button className={'tab ' + (tab === 'history' ? 'active' : '')} onClick={() => setTab('history')}>전체 이력</button></nav>
           {tab === 'chat' ? renderChat() : tab === 'overview' ? renderOverview() : tab === 'tasks' ? renderTasks() : tab === 'debate' ? renderDebate() : renderHistory()}
-        </> : <div className="welcome"><div className="panel welcome-card"><div className="brand-symbol"><img src={appIcon} alt="" /></div><div className="eyebrow">LOCAL FIRST WORKSPACE</div>{bootstrap && (bootstrap.missingProjectPaths.length || bootstrap.unavailableProjectPaths.length) ? <><h1>등록된 프로젝트를 확인하는 중</h1><p className="subtle">프로젝트 등록은 남아 있습니다. 폴더가 연결되면 자동으로 다시 읽습니다. 지금 다시 확인할 수도 있습니다.</p><button className="button primary" disabled={!!busy} onClick={() => void perform('프로젝트 다시 찾는 중', () => reloadRegisteredProjects())}>프로젝트 다시 찾기</button></> : <><h1>두 모델의 관점을 한곳에서</h1><p className="subtle">프로젝트 폴더를 지정하고 Codex와 Claude가 논쟁, 분업, 교차 검수를 진행하도록 설정하세요. 모든 대화와 산출물은 로컬에 보존됩니다.</p><button className="button primary" onClick={openProjectDialog}>첫 프로젝트 만들기</button></>}</div></div>}
+        </> : <div className="welcome"><div className="panel welcome-card"><div className="brand-symbol"><img src={appIcon} alt="" /></div><div className="eyebrow">LOCAL FIRST WORKSPACE</div>{bootstrap && (bootstrap.missingProjectPaths.length || bootstrap.unavailableProjectPaths.length) ? <><h1>등록된 프로젝트를 확인하는 중</h1><p className="subtle">프로젝트 등록은 남아 있습니다. 폴더가 연결되면 자동으로 다시 읽습니다. 지금 다시 확인할 수도 있습니다.</p><button className="button primary" disabled={!!busy} onClick={() => void perform('프로젝트 다시 찾는 중', () => reloadRegisteredProjects())}>프로젝트 다시 찾기</button></> : <><h1>두 모델의 관점을 한곳에서</h1><p className="subtle">프로젝트 폴더를 지정하고 Codex와 Claude가 논쟁, 분업, 교차 검수를 진행하도록 설정하세요. 모든 대화와 산출물은 로컬에 보존됩니다.</p><button className="button primary" onClick={openProjectDialog}>첫 프로젝트 만들기</button></>}<button className="button" onClick={reconnectExistingProject}>기존 프로젝트 폴더 연결</button></div></div>}
       </main>
       {project && renderComposer()}
     </div>

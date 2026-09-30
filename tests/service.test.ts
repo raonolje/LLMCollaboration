@@ -462,6 +462,41 @@ describe('local CLI executable settings', () => {
 });
 
 describe('project deletion', () => {
+  it('restores a missing project registry from its backup and reconnects an existing folder', () => withTemporaryWorkspace(async (workspace) => {
+    const projectPath = path.join(workspace, 'project');
+    const registryPath = path.join(workspace, 'app-data', 'registry.json');
+    const service = createService({ registryPath, emit: () => undefined, autoStartSessions: false });
+    const created = await service.createProject({ path: projectPath, name: 'Existing work', goal: 'Keep the existing files' });
+    expect(JSON.parse(await readFile(`${registryPath}.backup`, 'utf8'))).toEqual([projectPath]);
+
+    await rm(registryPath);
+    expect((await service.bootstrap()).projects.map((item) => item.id)).toEqual([created.project.id]);
+    expect(JSON.parse(await readFile(registryPath, 'utf8'))).toEqual([projectPath]);
+
+    await writeFile(registryPath, '[]\n');
+    expect((await service.bootstrap()).projects.map((item) => item.id)).toEqual([created.project.id]);
+    expect(JSON.parse(await readFile(registryPath, 'utf8'))).toEqual([projectPath]);
+
+    await service.unregisterProjectOnly(projectPath, created.project.id, created.project.name);
+    expect(JSON.parse(await readFile(`${registryPath}.backup`, 'utf8'))).toEqual([]);
+    expect((await service.reconnectProject(path.join(projectPath, '.llm-collaboration'))).project.id).toBe(created.project.id);
+    expect(JSON.parse(await readFile(registryPath, 'utf8'))).toEqual([projectPath]);
+  }), 30_000);
+
+  it('persists each project model and effort selection across service restarts', () => withTemporaryWorkspace(async (workspace) => {
+    const projectPath = path.join(workspace, 'project');
+    const registryPath = path.join(workspace, 'app-data', 'registry.json');
+    const service = createService({ registryPath, emit: () => undefined, autoStartSessions: false });
+    await service.createProject({ path: projectPath, name: 'Model choices', goal: 'Remember settings' });
+    await service.updateProjectChatModel(projectPath, 'codex', { model: 'gpt-6-sol', effort: 'high' });
+    await service.updateProjectChatModel(projectPath, 'claude', { model: 'opus', effort: 'medium' });
+    const reopened = createService({ registryPath, emit: () => undefined, autoStartSessions: false });
+    expect((await reopened.openProject(projectPath)).project.chatModels).toEqual({
+      codex: { model: 'gpt-6-sol', effort: 'high' },
+      claude: { model: 'opus', effort: 'medium' },
+    });
+  }), 30_000);
+
   it('removes a registered project from the app while keeping its existing folder and Git history', () => withTemporaryWorkspace(async (workspace) => {
     const projectPath = path.join(workspace, 'project');
     const registryPath = path.join(workspace, 'registry.json');

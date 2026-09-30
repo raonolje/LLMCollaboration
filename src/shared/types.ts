@@ -120,6 +120,7 @@ export type Project = Readonly<{
   goal: string;
   charter: string;
   defaultDebateRounds: number;
+  chatModels?: Partial<Record<Provider, ChatModelSettings>>;
   createdAt: string;
   updatedAt: string;
   sessions?: ExternalSession[];
@@ -202,6 +203,7 @@ export type CollaborationAPI = Readonly<{
   setRemoteEnabled: (enabled: boolean) => Promise<RemoteStatus>;
   rotateRemoteToken: () => Promise<RemoteStatus>;
   createProject: (input: ProjectInput) => Promise<ProjectSnapshot>;
+  reconnectProject: (projectPath: string) => Promise<ProjectSnapshot>;
   chooseChatFiles: () => Promise<string[]>;
   sendProjectMessage: (projectPath: string, message: string, target: Provider | 'both', models: Partial<Record<Provider, ChatModelSettings>>, files?: ChatFileInput[], discussion?: boolean) => Promise<ProjectSnapshot>;
   continueProjectDiscussion: (projectPath: string, messageId: string) => Promise<ProjectSnapshot>;
@@ -220,6 +222,7 @@ export type CollaborationAPI = Readonly<{
   openProject: (projectPath: string) => Promise<ProjectSnapshot>;
   updateCharter: (projectPath: string, charter: string) => Promise<ProjectSnapshot>;
   updateProjectRounds: (projectPath: string, rounds: number) => Promise<ProjectSnapshot>;
+  updateProjectChatModel: (projectPath: string, provider: Provider, settings: ChatModelSettings) => Promise<void>;
   createTask: (projectPath: string, input: TaskInput) => Promise<ProjectSnapshot>;
   planTasks: (projectPath: string, request: string) => Promise<ProjectSnapshot>;
   updateTask: (projectPath: string, task: Task) => Promise<ProjectSnapshot>;

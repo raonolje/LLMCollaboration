@@ -122,6 +122,7 @@ const registerHandlers = (): void => {
     return downloaded;
   });
   ipcMain.handle('collab:createProject', (_event, input) => service.createProject(input));
+  ipcMain.handle('collab:reconnectProject', (_event, projectPath) => service.reconnectProject(projectPath));
   ipcMain.handle('collab:chooseChatFiles', async () => {
     const options: Electron.OpenDialogOptions = { title: '채팅에 첨부할 이미지 또는 파일 선택', properties: ['openFile', 'multiSelections'] };
     const result = mainWindow ? await dialog.showOpenDialog(mainWindow, options) : await dialog.showOpenDialog(options);
@@ -146,6 +147,7 @@ const registerHandlers = (): void => {
   ipcMain.handle('collab:openProject', (_event, projectPath) => service.openProject(projectPath));
   ipcMain.handle('collab:updateCharter', (_event, projectPath, charter) => service.updateCharter(projectPath, charter));
   ipcMain.handle('collab:updateProjectRounds', (_event, projectPath, rounds) => service.updateProjectRounds(projectPath, rounds));
+  ipcMain.handle('collab:updateProjectChatModel', (_event, projectPath, provider, settings) => service.updateProjectChatModel(projectPath, provider, settings));
   ipcMain.handle('collab:createTask', (_event, projectPath, input) => service.createTask(projectPath, input));
   ipcMain.handle('collab:planTasks', (_event, projectPath, request) => service.planTasks(projectPath, request));
   ipcMain.handle('collab:updateTask', (_event, projectPath, task) => service.updateTask(projectPath, task));

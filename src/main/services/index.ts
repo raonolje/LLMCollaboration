@@ -352,26 +352,52 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
     return task;
   };
 
-  const readRegisteredPaths = async (): Promise<string[]> =>
-    readFile(registryPath, 'utf8')
-      .then((content) => JSON.parse(content) as string[])
-      .catch((error: unknown) => {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
-        throw error;
-      });
+  const registryBackupPath = `${registryPath}.backup`;
+  const readRegistryFile = async (file: string): Promise<string[] | null> =>
+    readFile(file, 'utf8').then((content) => {
+      const parsed: unknown = JSON.parse(content);
+      if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === 'string' && path.isAbsolute(item))) {
+        throw new Error(`프로젝트 등록 파일 형식이 올바르지 않습니다: ${file}`);
+      }
+      return parsed;
+    }).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    });
+  const readRegisteredPaths = async (): Promise<string[]> => {
+    const primary = await readRegistryFile(registryPath).then(
+      (value) => ({ value, error: null }), (error: unknown) => ({ value: null, error }));
+    if (primary.value?.length) return primary.value;
+    const backup = await readRegistryFile(registryBackupPath).then(
+      (value) => ({ value, error: null }), (error: unknown) => ({ value: null, error }));
+    if (backup.value?.length) return backup.value;
+    if (primary.value) return primary.value;
+    if (backup.value) return backup.value;
+    if (primary.error) throw primary.error;
+    if (backup.error) throw backup.error;
+    return [];
+  };
+
+  const writeRegisteredPaths = async (paths: string[]): Promise<void> => {
+    await writeJson(registryPath, paths);
+    await writeJson(registryBackupPath, paths);
+  };
 
   const registerProject = async (projectPath: string): Promise<void> => {
     await withLock('registry', async () => {
       const paths = await readRegisteredPaths();
-      if (paths.some((candidate) => samePath(candidate, projectPath))) return;
-      await writeJson(registryPath, [...paths, projectPath]);
+      if (paths.some((candidate) => samePath(candidate, projectPath))) {
+        await writeRegisteredPaths(paths);
+        return;
+      }
+      await writeRegisteredPaths([...paths, projectPath]);
     });
   };
 
   const unregisterProject = async (projectPath: string): Promise<void> =>
     withLock('registry', async () => {
       const paths = await readRegisteredPaths();
-      await writeJson(registryPath, paths.filter((candidate) => !samePath(candidate, projectPath)));
+      await writeRegisteredPaths(paths.filter((candidate) => !samePath(candidate, projectPath)));
     });
 
   const taskById = async (projectPath: string, taskId: string): Promise<{ project: Project; task: Task; events: CollaborationEvent[] }> => {
@@ -603,6 +629,14 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
       .map(async (projectPath) => ({ ...await readProject(projectPath), path: path.resolve(projectPath) }))))
       .filter((result): result is PromiseFulfilledResult<Project> => result.status === 'fulfilled')
       .map((result) => result.value),
+    reconnectProject: async (projectPath: string): Promise<ProjectSnapshot> => {
+      const selected = path.resolve(projectPath);
+      const resolved = path.basename(selected).toLowerCase() === '.llm-collaboration' ? path.dirname(selected) : selected;
+      const project = await readProject(resolved);
+      if (!samePath(project.path, resolved)) throw new Error('프로젝트 기록의 폴더 경로가 선택한 폴더와 다릅니다.');
+      await registerProject(resolved);
+      return snapshot(resolved);
+    },
     listLocalConversations,
     refreshModelCatalogs: async () => Promise.all(providers.map(async (provider) =>
       discoverModelCatalog(provider, await cliPathFor(provider)))),
@@ -719,7 +753,16 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
       finally { finish(resolved, 'project-chat'); }
     },
     bootstrap: async (): Promise<Bootstrap> => {
-      const projectPaths = await readRegisteredPaths();
+      const projectPaths = await withLock('registry', async () => {
+        const paths = await readRegisteredPaths();
+        if (paths.length && !((await readRegistryFile(registryPath).catch(() => null))?.length)) {
+          await writeJson(registryPath, paths);
+        }
+        if (paths.length && !((await readRegistryFile(registryBackupPath).catch(() => null))?.length)) {
+          await writeJson(registryBackupPath, paths);
+        }
+        return paths;
+      });
       const [projectResults, cliResults] = await Promise.all([
         Promise.allSettled(projectPaths.map(async (projectPath) => ({ ...await readProject(projectPath), path: path.resolve(projectPath) }))),
         cliStatuses(),
@@ -935,6 +978,15 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
       const result = await replaceProject(resolved, (project) => ({ ...project, defaultDebateRounds: count, updatedAt: now() }));
       await event(resolved, result.project.id, 'system', 'user', `프로젝트 기본 토론 왕복 횟수를 ${count}회로 설정했습니다.`);
       return snapshot(resolved);
+    },
+
+    updateProjectChatModel: async (projectPath: string, provider: Provider, settings: ChatModelSettings): Promise<void> => {
+      if (!providers.includes(provider) || typeof settings?.model !== 'string' || typeof settings?.effort !== 'string'
+        || settings.model.length > 120 || settings.effort.length > 40) throw new Error('모델 설정이 올바르지 않습니다.');
+      const resolved = path.resolve(projectPath);
+      await replaceProject(resolved, (project) => ({ ...project,
+        chatModels: { ...project.chatModels, [provider]: settings }, updatedAt: now(),
+      }));
     },
 
     createTask: async (projectPath: string, input: TaskInput): Promise<ProjectSnapshot> => {
