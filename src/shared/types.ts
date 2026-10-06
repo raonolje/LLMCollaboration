@@ -25,6 +25,12 @@ export type ModelCatalog = Readonly<{
   models: ModelOption[];
   warning?: string;
 }>;
+export type AppUpdateDraft = Readonly<{
+  version: 1; projectPath?: string; text: string; files: ChatFileInput[];
+  target: Provider | 'both'; models: Partial<Record<Provider, ChatModelSettings>>;
+  discussion: boolean; discussionRounds: number; composerOpen: boolean;
+}>;
+export type AppUpdateReady = Readonly<{ sidebarViewport: boolean; independentScroll: boolean; draftRestored: boolean }>;
 export type AppUpdateCheck = Readonly<{
   currentVersion: string;
   latestVersion: string;
@@ -198,7 +204,10 @@ export type CollaborationAPI = Readonly<{
   refreshCliStatus: () => Promise<CliStatus[]>;
   refreshModelCatalogs: () => Promise<ModelCatalog[]>;
   checkAppUpdate: () => Promise<AppUpdateCheck>;
-  downloadAppUpdate: () => Promise<string>;
+  downloadAppUpdate: (draft: AppUpdateDraft) => Promise<string>;
+  readUpdateDraft: () => Promise<AppUpdateDraft | null>;
+  clearUpdateDraft: () => Promise<void>;
+  updateReady: (state: AppUpdateReady) => Promise<void>;
   remoteStatus: () => Promise<RemoteStatus>;
   setRemoteEnabled: (enabled: boolean) => Promise<RemoteStatus>;
   rotateRemoteToken: () => Promise<RemoteStatus>;

@@ -51,7 +51,7 @@ const message = (error: unknown): string => error instanceof Error ? error.messa
 const projectBasePath = (): string => path.join(homedir(), 'Documents', 'LLM Collaboration');
 const projectFolderName = (name: string): string => name.normalize('NFKC').replace(/[<>:"/\\|?*\u0000-\u001f]/gu, '-').replace(/[. ]+$/u, '').trim().slice(0, 60) || 'project';
 
-export const createRemote = (service: Service, userData: string, options: { address?: string; port?: number; webRoot?: string } = {}) => {
+export const createRemote = (service: Service, userData: string, options: { address?: string; port?: number; webRoot?: string; maintenance?: () => boolean } = {}) => {
   const settingsFile = path.join(userData, 'remote-settings.json');
   let server: Server | null = null;
   let boundAddress: string | undefined;
@@ -116,6 +116,9 @@ export const createRemote = (service: Service, userData: string, options: { addr
         return;
       }
       if (!authorized(request, (await readSettings()).token)) { json(response, 401, { error: '연결 코드가 올바르지 않습니다.' }); return; }
+      if (options.maintenance?.() && !(request.method === 'GET' && ['/v1/health', '/v1/operations', '/v1/projects', '/v1/events'].includes(url.pathname))) {
+        json(response, 503, { error: '업데이트 준비 중입니다. 토론과 업무가 끝난 뒤 자동 재시작합니다.' }); return;
+      }
       const segments = url.pathname.split('/').filter(Boolean);
       if (request.method === 'GET' && url.pathname === '/v1/events') {
         response.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Content-Type-Options': 'nosniff' });

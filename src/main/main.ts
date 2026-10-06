@@ -7,6 +7,8 @@ import { recycleDirectoryWithWindows } from './windows-recycle';
 import { checkAppUpdate, downloadAppUpdate, launchDownloadedUpdate } from './updater';
 import { createRemote } from './remote';
 import { windowsAppId, windowsLaunchDetails } from './windows-launch';
+import { prepareWindowsUpdate, launchWindowsUpdate, acknowledgeWindowsUpdate } from './windows-update';
+import { readUpdateDraft, saveUpdateDraft, clearUpdateDraft } from './update-recovery';
 
 const windowsLaunch = process.platform === 'win32'
   ? windowsLaunchDetails(process.execPath, process.env.PORTABLE_EXECUTABLE_FILE,
@@ -83,13 +85,15 @@ const createWindow = (): BrowserWindow => {
 };
 
 const registerHandlers = (): void => {
+  let updatePending = false;
+  let updateStarting = Boolean(process.env.LLM_COLLAB_UPDATE_HANDOFF);
   let remote: ReturnType<typeof createRemote> | undefined;
   const service = createService({
     registryPath: path.join(app.getPath('userData'), 'projects.json'),
     emit: (event: CollaborationEvent) => { mainWindow?.webContents.send('collab:event', event); remote?.publishEvent(event); },
     trashItem: trashItemWithFallback,
   });
-  remote = createRemote(service, app.getPath('userData'), { webRoot: path.join(app.getAppPath(), 'mobile', 'web-dist') });
+  remote = createRemote(service, app.getPath('userData'), { webRoot: path.join(app.getAppPath(), 'mobile', 'web-dist'), maintenance: () => updatePending || updateStarting });
   closeRemote = remote.close;
   void remote.initialize();
 
@@ -131,12 +135,47 @@ const registerHandlers = (): void => {
   ipcMain.handle('collab:setRemoteEnabled', (_event, enabled: boolean) => remote.setEnabled(enabled));
   ipcMain.handle('collab:rotateRemoteToken', () => remote.rotateToken());
   ipcMain.handle('collab:checkAppUpdate', () => checkAppUpdate(app.getVersion(), process.platform, process.arch, !!process.env.PORTABLE_EXECUTABLE_FILE));
-  ipcMain.handle('collab:downloadAppUpdate', async () => {
-    const downloaded = await downloadAppUpdate(app.getVersion(), process.platform, process.arch,
-      !!process.env.PORTABLE_EXECUTABLE_FILE, app.getPath('userData'));
-    launchDownloadedUpdate(downloaded);
-    setTimeout(() => app.quit(), 200);
-    return downloaded;
+  ipcMain.handle('collab:readUpdateDraft', () => readUpdateDraft(app.getPath('userData')));
+  ipcMain.handle('collab:clearUpdateDraft', () => clearUpdateDraft(app.getPath('userData')));
+  ipcMain.handle('collab:updateReady', async (event, state) => {
+    if (event.sender !== mainWindow?.webContents) throw new Error('앱의 시작 화면에서 다시 시도해 주세요.');
+    try {
+      await acknowledgeWindowsUpdate(app.getPath('userData'), app.getVersion(), process.env.LLM_COLLAB_UPDATE_HANDOFF, state);
+      updateStarting = false;
+      delete process.env.LLM_COLLAB_UPDATE_HANDOFF;
+    } catch (error) {
+      if (updateStarting) { await closeRemote?.(); setImmediate(() => app.quit()); }
+      throw error;
+    }
+  });
+  ipcMain.handle('collab:downloadAppUpdate', async (event, draft: unknown) => {
+    if (event.sender !== mainWindow?.webContents) throw new Error('앱의 업데이트 화면에서 다시 시도해 주세요.');
+    if (updatePending) throw new Error('업데이트가 이미 진행 중입니다.');
+    updatePending = true;
+    let resume: (() => void) | undefined;
+    let draftSaved = false;
+    try {
+      const directory = app.getPath('userData');
+      await saveUpdateDraft(directory, draft);
+      draftSaved = true;
+      resume = await service.prepareForUpdate();
+      const portable = !!process.env.PORTABLE_EXECUTABLE_FILE;
+      const downloaded = await downloadAppUpdate(app.getVersion(), process.platform, process.arch, portable, directory);
+      if (process.platform === 'win32') {
+        const manifest = await prepareWindowsUpdate(downloaded, { directory, portable,
+          target: process.env.PORTABLE_EXECUTABLE_FILE ?? process.execPath, currentVersion: app.getVersion(),
+          runtimePid: process.pid, launcherPid: process.ppid, projectPaths: (await service.listProjects()).map((project) => project.path) });
+        await launchWindowsUpdate(manifest);
+      } else launchDownloadedUpdate(downloaded.filePath);
+      await closeRemote?.().catch(() => undefined);
+      setImmediate(() => app.quit());
+      return downloaded.filePath;
+    } catch (error) {
+      if (draftSaved) await clearUpdateDraft(app.getPath('userData')).catch(() => undefined);
+      resume?.();
+      updatePending = false;
+      throw error;
+    }
   });
   ipcMain.handle('collab:createProject', (_event, input) => service.createProject(input));
   ipcMain.handle('collab:reconnectProject', (_event, projectPath) => service.reconnectProject(projectPath));

@@ -32,7 +32,8 @@ describe('remote companion', () => {
       unregisterProjectOnly,
       sendProjectMessage,
     } as unknown as Service;
-    const remote = createRemote(service, directory, { address: '127.0.0.1', port: 0, webRoot });
+    let maintenance = false;
+    const remote = createRemote(service, directory, { address: '127.0.0.1', port: 0, webRoot, maintenance: () => maintenance });
     try {
       const status = await remote.setEnabled(true);
       expect(status.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/u);
@@ -90,6 +91,12 @@ describe('remote companion', () => {
       expect(taskRequest.status).toBe(202);
       await vi.waitFor(() => expect(createTask).toHaveBeenCalledWith(directory, expect.objectContaining({ title: 'Build a mobile screen', executor: expect.objectContaining({ provider: 'claude' }) })));
       await vi.waitFor(() => expect(executeTask).toHaveBeenCalledWith(directory, 'task-1'));
+      maintenance = true;
+      expect((await fetch(`${status.url}/v1/projects`)).status).toBe(401);
+      expect((await fetch(`${status.url}/v1/health`, { headers })).status).toBe(200);
+      expect((await fetch(`${status.url}/v1/projects/project-1/chat`, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ message: 'During update' }) })).status).toBe(503);
+      expect(sendProjectMessage.mock.calls.some(call => call[1] === 'During update')).toBe(false);
+      maintenance = false;
       const rotated = await remote.rotateToken();
       expect(rotated.token).not.toBe(status.token);
       expect((await fetch(`${status.url}/v1/projects`, { headers })).status).toBe(401);

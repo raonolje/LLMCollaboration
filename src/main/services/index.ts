@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { UpdateGate } from '../update-gate';
 import { createReadStream, realpathSync } from 'node:fs';
 import { copyFile, lstat, mkdir, readFile, readdir, realpath, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -50,7 +51,7 @@ import { discoverModelCatalog } from './model-catalog';
 import { contextPreview, discussionContext, conclusionProvider } from './discussion-context';
 import { finalConsensus, explicitlyAgreed, isNoDisagreement, parseDebateSummary } from '../../shared/debate-summary';
 
-export type Service = Omit<CollaborationAPI, 'chooseDirectory' | 'chooseCliExecutable' | 'chooseConversationFile' | 'chooseChatFiles' | 'onEvent' | 'openDesktopSession' | 'consumeLaunchRequest' | 'onLaunchRequest' | 'installChatSkills' | 'checkAppUpdate' | 'downloadAppUpdate' | 'remoteStatus' | 'setRemoteEnabled' | 'rotateRemoteToken'> & { listProjects: () => Promise<Project[]> };
+export type Service = Omit<CollaborationAPI, 'chooseDirectory' | 'chooseCliExecutable' | 'chooseConversationFile' | 'chooseChatFiles' | 'onEvent' | 'openDesktopSession' | 'consumeLaunchRequest' | 'onLaunchRequest' | 'installChatSkills' | 'checkAppUpdate' | 'downloadAppUpdate' | 'readUpdateDraft' | 'clearUpdateDraft' | 'updateReady' | 'remoteStatus' | 'setRemoteEnabled' | 'rotateRemoteToken'> & { listProjects: () => Promise<Project[]>; prepareForUpdate: () => Promise<() => void> };
 
 export type ServiceOptions = Readonly<{
   registryPath: string;
@@ -665,7 +666,9 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
     return snapshot(projectPath);
   };
 
+  const updateGate = new UpdateGate();
   const service: Service = {
+    prepareForUpdate: () => updateGate.freeze(),
     listProjects: async (): Promise<Project[]> => (await Promise.allSettled((await readRegisteredPaths())
       .map(async (projectPath) => ({ ...await readProject(projectPath), path: path.resolve(projectPath) }))))
       .filter((result): result is PromiseFulfilledResult<Project> => result.status === 'fulfilled')
@@ -1344,5 +1347,9 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
         { sessionId, handedOffAt });
     }),
   };
-  return service;
+  return new Proxy(service, { get(target, name, receiver) {
+    const value = Reflect.get(target, name, receiver);
+    if (typeof value !== 'function' || name === 'prepareForUpdate' || name === 'listProjects') return value;
+    return (...args: unknown[]) => updateGate.run(async () => Reflect.apply(value, target, args));
+  } });
 };

@@ -6,6 +6,7 @@ import { PendingReply } from './PendingReply';
 import type {
   AssignmentMode,
   AppUpdateCheck,
+  AppUpdateDraft,
   Bootstrap,
   CollaborationEvent,
   ConversationCandidate,
@@ -228,6 +229,11 @@ export default function App() {
   const chatDraftValue = useRef('');
   const chatDraftField = useRef<ChatDraftHandle>(null);
   const [chatHasDraft, setChatHasDraft] = useState(false);
+  const recoveryDraft = useRef<AppUpdateDraft | null>(null);
+  const updateAcknowledged = useRef(false);
+  const recoveryFailed = useRef(false);
+  const [startupReady, setStartupReady] = useState(false);
+  const [installingUpdate, setInstallingUpdate] = useState(false);
   const setChatDraft = (next: SetStateAction<string>): void => {
     const value = typeof next === 'function' ? next(chatDraftValue.current) : next;
     chatDraftValue.current = value;
@@ -393,21 +399,29 @@ export default function App() {
     applySnapshot(await window.collab.openProject(path));
   };
 
-  const reloadRegisteredProjects = async (isActive: () => boolean = () => true): Promise<void> => {
+  const reloadRegisteredProjects = async (isActive: () => boolean = () => true, preferredPath?: string): Promise<void> => {
     const request = ++bootstrapRequest.current;
     const result = await window.collab.bootstrap();
     if (!isActive() || request !== bootstrapRequest.current) return;
     setBootstrap(result);
     setProjects(result.projects);
     if (!snapshot && result.projects[0]) {
-      const next = await window.collab.openProject(result.projects[0].path);
+      const selected = result.projects.find((item) => item.path === preferredPath) ?? result.projects[0];
+      const next = await window.collab.openProject(selected.path);
       if (isActive() && request === bootstrapRequest.current) applySnapshot(next);
     }
   };
 
   useEffect(() => {
     let active = true;
-    void reloadRegisteredProjects(() => active).catch((error) => active && notify(errorText(error), true));
+    void (async () => {
+      const saved = await window.collab.readUpdateDraft().catch((error) => {
+        recoveryFailed.current = true; notify(errorText(error), true); return null;
+      });
+      if (!active) return;
+      recoveryDraft.current = saved;
+      await reloadRegisteredProjects(() => active, saved?.projectPath);
+    })().catch((error) => active && notify(errorText(error), true));
     return () => { active = false; };
   }, []);
 
@@ -459,6 +473,40 @@ export default function App() {
     setChatDiscussionRounds(project?.defaultDebateRounds ?? 2);
     setTaskDiscussionId(null);
   }, [project?.id, project?.defaultDebateRounds]);
+  useEffect(() => {
+    if (!bootstrap || (bootstrap.projects.length && !project) || updateAcknowledged.current) return;
+    const saved = recoveryDraft.current;
+    const confirmReady = (clearSaved: boolean): void => {
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (updateAcknowledged.current) return;
+        updateAcknowledged.current = true;
+        const sidebar = document.querySelector<HTMLElement>('.sidebar');
+        const content = document.querySelector<HTMLElement>('.content');
+        const state = {
+          sidebarViewport: !!sidebar && Math.abs(sidebar.getBoundingClientRect().height - innerHeight) < 2,
+          independentScroll: !!sidebar && !!content && getComputedStyle(sidebar).overflowY === 'auto' && getComputedStyle(content).overflowY === 'auto',
+          draftRestored: !recoveryFailed.current && (!saved || clearSaved && chatDraftValue.current === saved.text),
+        };
+        void window.collab.updateReady(state).then(async () => {
+          recoveryDraft.current = null;
+          setStartupReady(true);
+          if (saved && clearSaved) await window.collab.clearUpdateDraft();
+        }).catch((error) => notify(errorText(error), true));
+      }));
+    };
+    if (saved?.projectPath && saved.projectPath !== project?.path) {
+      notify('초안의 원래 프로젝트를 찾지 못했습니다. 초안은 보관되어 다음 실행 때 다시 복구합니다.', true);
+      confirmReady(false);
+      return;
+    }
+    if (saved) {
+      setChatDraft(saved.text); setChatFiles(saved.files); setChatTarget(saved.target);
+      setChatModels((current) => ({ codex: saved.models.codex ?? current.codex, claude: saved.models.claude ?? current.claude }));
+      setChatDiscussion(saved.discussion); setChatDiscussionRounds(saved.discussionRounds); setComposerOpen(saved.composerOpen);
+      notify('업데이트 전 작성하던 메시지와 첨부 파일을 복구했습니다.');
+    }
+    confirmReady(true);
+  }, [bootstrap, project?.id]);
 
   const openProject = (item: Project): void => {
     void perform('프로젝트를 여는 중', async () => {
@@ -569,9 +617,14 @@ export default function App() {
   };
 
   const installUpdate = async (): Promise<void> => {
+    if (installingUpdate) return;
+    if (dialog) { notify('작성 중인 양식을 먼저 저장해 주세요.', true); return; }
+    setInstallingUpdate(true);
     setUpdateBusy(true);
-    try { await window.collab.downloadAppUpdate(); }
-    catch (error) { notify(errorText(error), true); setUpdateBusy(false); }
+    try { await window.collab.downloadAppUpdate({version: 1, projectPath: project?.path, text: chatDraftValue.current,
+      files: chatFiles, target: chatTarget, models: chatModels, discussion: chatDiscussion,
+      discussionRounds: chatDiscussionRounds, composerOpen }); }
+    catch (error) { notify(errorText(error), true); setUpdateBusy(false); setInstallingUpdate(false); }
   };
 
   useEffect(() => {
@@ -1286,8 +1339,8 @@ export default function App() {
     </div>
   );
 
-  return <div className="app-shell">
-    <aside className="sidebar" aria-label="프로젝트 내비게이션" tabIndex={0}>
+  return <><div className="app-shell" inert={installingUpdate || !startupReady}>
+    <aside className="sidebar" aria-label="프로젝트 내비게이션" tabIndex={0} inert={installingUpdate || !startupReady}>
       <div className="brand"><div className="brand-symbol"><img src={appIcon} alt="" /></div><span>LLM Collaboration</span></div>
       <div className="side-projects">
         <div className="side-label">프로젝트 <button className="cli-refresh" type="button" disabled={!!busy} onClick={() => void perform('프로젝트 다시 찾는 중', () => reloadRegisteredProjects())}>↻ 다시 찾기</button></div>
@@ -1312,7 +1365,7 @@ export default function App() {
         <p className="cli-help">로그인은 Codex·Claude CLI에서 진행합니다. 이 앱에는 계정 정보를 입력하지 않습니다.</p>
       </div>
     </aside>
-    <div className={`main${project ? ` has-chat-dock${composerOpen ? '' : ' collapsed'}` : ''}`}>
+    <div className={`main${project ? ` has-chat-dock${composerOpen ? '' : ' collapsed'}` : ''}`} inert={installingUpdate || !startupReady}>
       <header className="topbar"><div className="breadcrumbs">프로젝트 <span> / </span><strong>{project?.name ?? '시작하기'}</strong></div><div className="topbar-actions"><span className={'topbar-note ' + (busy || runningTaskIds.size ? 'busy' : '')}>{busy ? '◌ ' + busy + '…' : runningTaskIds.size ? `◌ 업무 ${runningTaskIds.size}개 실행 중` : '로컬 CLI · 로컬 기록 · Git'}</span><button className="button small" type="button" disabled={remoteBusy} onClick={openRemote}>{remoteBusy ? '모바일 연결 중…' : '모바일 연결'}</button><button className="button small" type="button" disabled={updateBusy} onClick={() => void checkForUpdate()}>{updateBusy ? '업데이트 확인 중…' : '앱 업데이트'}</button>{project && <button className="button small" onClick={() => void perform('새로고침 중', async () => refresh(project.path))} disabled={!!busy}>↻ 새로고침</button>}</div></header>
       {toast && <div className={'toast ' + (toast.error ? 'error ' : '') + (dialog || remoteOpen || updateCheck ? 'in-modal' : '')} role={toast.error ? 'alert' : 'status'}><span>{toast.message}</span><button type="button" aria-label="알림 닫기" onClick={() => setToast(null)}>×</button></div>}
       <main className="content" aria-label="프로젝트 본문" tabIndex={0}>
@@ -1325,7 +1378,7 @@ export default function App() {
       {project && renderComposer()}
     </div>
     {busy && <div className="busy-overlay"><div className="busy-bar" /></div>}
-    {updateCheck && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setUpdateCheck(null)}><div className="modal" role="dialog" aria-modal="true" aria-label="앱 업데이트"><div className="modal-header"><div><h2>앱 업데이트</h2><p className="subtle">현재 {updateCheck.currentVersion} · 최신 {updateCheck.latestVersion}</p></div><button className="close" aria-label="닫기" onClick={() => setUpdateCheck(null)}>×</button></div><div className="modal-body"><p className="subtle">{updateCheck.available ? updateCheck.assetName ? `${updateCheck.assetName} 파일을 내려받아 SHA-256 확인 후 실행합니다. 앱이 종료됩니다.` : '새 버전이 있지만 이 운영체제용 파일이 없습니다.' : '현재 최신 버전을 사용 중입니다.'}</p><div className="form-actions"><button className="button" type="button" onClick={() => setUpdateCheck(null)}>닫기</button>{updateCheck.available && updateCheck.assetName && <button className="button primary" type="button" disabled={updateBusy} onClick={() => void installUpdate()}>{updateBusy ? '다운로드 중…' : '다운로드하고 업데이트'}</button>}</div></div></div></div>}
+    {updateCheck && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setUpdateCheck(null)}><div className="modal" role="dialog" aria-modal="true" aria-label="앱 업데이트"><div className="modal-header"><div><h2>앱 업데이트</h2><p className="subtle">현재 {updateCheck.currentVersion} · 최신 {updateCheck.latestVersion}</p></div><button className="close" aria-label="닫기" onClick={() => setUpdateCheck(null)}>×</button></div><div className="modal-body"><p className="subtle">{updateCheck.available ? updateCheck.assetName ? `${updateCheck.assetName} 파일을 확인하고 입력 중인 글을 보관합니다. 진행 중인 작업이 끝나면 앱이 자동으로 종료·설치·재실행됩니다.` : '새 버전이 있지만 이 운영체제용 파일이 없습니다.' : '현재 최신 버전을 사용 중입니다.'}</p><div className="form-actions"><button className="button" type="button" onClick={() => setUpdateCheck(null)}>닫기</button>{updateCheck.available && updateCheck.assetName && <button className="button primary" type="button" disabled={updateBusy} onClick={() => void installUpdate()}>{updateBusy ? '업데이트 준비 중…' : '다운로드하고 업데이트'}</button>}</div></div></div></div>}
     {remoteOpen && remoteStatus && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setRemoteOpen(false)}><div className="modal" role="dialog" aria-modal="true" aria-label="아이폰 원격 연결"><div className="modal-header"><div><h2>아이폰 원격 연결</h2><p className="subtle">PC와 iPhone을 같은 Tailscale 네트워크에 연결하세요.</p></div><button className="close" aria-label="닫기" onClick={() => setRemoteOpen(false)}>×</button></div><div className="modal-body form-stack"><p className="subtle">데스크톱이 켜져 있는 동안 아이폰에서 프로젝트 기록을 보고 Codex·Claude에게 지시할 수 있습니다. CLI 구독 로그인은 이 PC에만 유지됩니다.</p><div className="note"><strong>상태</strong><br />{remoteStatus.enabled ? remoteStatus.url ? '연결 대기 중' : 'Tailscale 연결 필요' : '꺼짐'}{remoteStatus.error && <p>{remoteStatus.error}</p>}</div>{remoteStatus.url && remoteStatus.token && <PairingQR url={remoteStatus.url} token={remoteStatus.token} />}{remoteStatus.url && <div className="field"><label>아이폰에 입력할 주소</label><input readOnly value={remoteStatus.url} onFocus={(event) => event.currentTarget.select()} /></div>}<div className="field"><label>연결 코드 · 비밀번호처럼 보관하세요</label><input readOnly value={remoteStatus.token ?? ''} onFocus={(event) => event.currentTarget.select()} /></div><div className="form-actions"><button className="button" type="button" disabled={remoteBusy} onClick={() => { setRemoteBusy(true); void window.collab.rotateRemoteToken().then(setRemoteStatus).catch((error: unknown) => notify(errorText(error), true)).finally(() => setRemoteBusy(false)); }}>코드 재발급</button>{remoteStatus.enabled && !remoteStatus.url && <button className="button" type="button" disabled={remoteBusy} onClick={() => { setRemoteBusy(true); void window.collab.setRemoteEnabled(true).then(setRemoteStatus).catch((error: unknown) => notify(errorText(error), true)).finally(() => setRemoteBusy(false)); }}>연결 다시 시도</button>}<button className={'button ' + (remoteStatus.enabled ? 'danger' : 'primary')} type="button" disabled={remoteBusy} onClick={() => { setRemoteBusy(true); void window.collab.setRemoteEnabled(!remoteStatus.enabled).then(setRemoteStatus).catch((error: unknown) => notify(errorText(error), true)).finally(() => setRemoteBusy(false)); }}>{remoteStatus.enabled ? '원격 연결 끄기' : '원격 연결 켜기'}</button></div></div></div></div>}
     {dialog === 'project' && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !projectCreatePending.current && setDialog(null)}><div className="modal" role="dialog" aria-modal="true" aria-label="프로젝트 만들기"><div className="modal-header"><div><h2>새 프로젝트</h2><p className="subtle">지정한 폴더에 모든 산출물과 Git 기록을 저장합니다.</p></div><button className="close" aria-label="닫기" disabled={busy === '프로젝트 생성 중'} onClick={() => setDialog(null)}>×</button></div><form className="modal-body form-stack" onSubmit={submitProject}>
       <div className="field"><label htmlFor="project-name">프로젝트 이름</label><input id="project-name" required value={projectDraft.name} onChange={(event) => setProjectDraft((previous) => ({ ...previous, name: event.target.value }))} placeholder="예: 새 서비스 개발" /></div>
@@ -1354,5 +1407,5 @@ export default function App() {
     {dialog === 'session-history' && sessionHistory && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setDialog(null)}><div className="modal session-history-modal" role="dialog" aria-modal="true" aria-label="저장된 모델 대화"><div className="modal-header"><div><h2>{providerLabel(sessionHistory.session.provider)} 저장된 대화</h2><p className="subtle">{sessionHistory.session.sessionId}</p></div><button className="close" aria-label="닫기" onClick={() => setDialog(null)}>×</button></div><div className="modal-body"><p className="subtle session-history-note">프로젝트 Git에 저장된 기록입니다. CLI나 데스크톱 앱 연결 없이 볼 수 있습니다.</p>{sessionHistory.turns.length ? sessionHistory.turns.map(({ event, prompt }) => <article className="session-turn" key={event.id}><div className="session-turn-head"><span className="badge neutral">{eventLabel[event.type]}</span><span className="activity-time">{shortTime(event.timestamp)}</span>{event.metadata?.transcript && <button className="button ghost small" type="button" onClick={() => openTranscript(event)}>CLI 원문</button>}</div>{prompt && <details className="session-prompt"><summary>모델에 전달한 요청</summary><pre>{prompt}</pre></details>}<div className="session-response"><MarkdownText text={event.message} /></div></article>) : <Empty icon="◎" title="저장된 응답이 없습니다" detail="해당 세션의 작업 이력이 기록되면 이곳에 표시됩니다." />}</div></div></div>}
     {dialog === 'chat-message' && expandedChat && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setDialog(null)}><div className="modal chat-response-modal" role="dialog" aria-modal="true" aria-label="기록 전체 보기"><div className="modal-header"><div><h2>{actorLabel(expandedChat.actor)} 기록 전체 보기</h2><p className="subtle">{shortTime(expandedChat.timestamp)} · {expandedChat.message.length.toLocaleString()}자</p></div><button className="close" aria-label="닫기" onClick={() => setDialog(null)}>×</button></div><div className="modal-body"><div className="session-response"><MarkdownText text={expandedChat.message} /></div></div></div></div>}
     {dialog === 'transcript' && transcriptView && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setDialog(null)}><div className="modal transcript-modal" role="dialog" aria-modal="true" aria-label="CLI 원문 기록"><div className="modal-header"><div><h2>CLI 원문 기록</h2><p className="subtle">{transcriptView.path}</p></div><button className="close" aria-label="닫기" onClick={() => setDialog(null)}>×</button></div><div className="modal-body"><pre className="transcript-content">{transcriptView.content}</pre></div></div></div>}
-  </div>;
+  </div>{(installingUpdate || !startupReady) && <div className="update-progress" role="status"><strong>{installingUpdate ? '업데이트를 준비합니다' : '프로젝트를 불러옵니다'}</strong>{installingUpdate && <p>토론과 업무가 끝나면 초안을 보관하고 백업·설치·재시작을 자동으로 진행합니다.</p>}</div>}</>;
 }
