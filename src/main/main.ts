@@ -6,6 +6,13 @@ import { installChatSkills, parseLaunchUrl } from './chat-link';
 import { recycleDirectoryWithWindows } from './windows-recycle';
 import { checkAppUpdate, downloadAppUpdate, launchDownloadedUpdate } from './updater';
 import { createRemote } from './remote';
+import { windowsAppId, windowsLaunchDetails } from './windows-launch';
+
+const windowsLaunch = process.platform === 'win32'
+  ? windowsLaunchDetails(process.execPath, process.env.PORTABLE_EXECUTABLE_FILE,
+    process.defaultApp ? process.argv[1] : undefined)
+  : null;
+if (windowsLaunch) app.setAppUserModelId(windowsAppId);
 
 let mainWindow: BrowserWindow | null = null;
 let closeRemote: (() => Promise<void>) | null = null;
@@ -50,6 +57,7 @@ const createWindow = (): BrowserWindow => {
     },
   });
 
+  if (windowsLaunch) window.setAppDetails(windowsLaunch.appDetails);
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('before-input-event', (event, input) => {
     if (!(process.platform === 'darwin' ? input.meta : input.control) || input.alt) return;
@@ -187,7 +195,9 @@ const registerHandlers = (): void => {
 
 void app.whenReady().then(() => {
   if (!hasInstanceLock) return;
-  if (process.defaultApp && process.argv[1]) {
+  if (windowsLaunch) {
+    app.setAsDefaultProtocolClient('llmcollaboration', windowsLaunch.target, windowsLaunch.args);
+  } else if (process.defaultApp && process.argv[1]) {
     app.setAsDefaultProtocolClient('llmcollaboration', process.execPath, [path.resolve(process.argv[1])]);
   } else app.setAsDefaultProtocolClient('llmcollaboration');
   void installChatSkills().catch(() => undefined);
