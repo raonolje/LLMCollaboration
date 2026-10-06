@@ -27,4 +27,10 @@ describe('debate summary', () => {
       agreements: ['파일은 로컬에 저장'], disagreements: ['배포 방식'], nextSteps: ['두 환경에서 실행'],
     });
   });
+
+  it('preserves balanced Markdown emphasis in summary items', () => {
+    expect(parseDebateSummary('## 합의된 사항\n- **토론 진행:** 양쪽이 반론에 답했습니다.')).toEqual({
+      agreements: ['**토론 진행:** 양쪽이 반론에 답했습니다.'], disagreements: [], nextSteps: [],
+    });
+  });
 });

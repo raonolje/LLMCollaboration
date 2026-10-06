@@ -58,6 +58,16 @@ const recordMockTranscript = async (request: CliRequest, text: string): Promise<
 };
 
 describe('service orchestration with an injected model', () => {
+  it('accepts only integer debate rounds from 1 through 8', () => withTemporaryWorkspace(async (workspace) => {
+    const projectPath = path.join(workspace, 'round-limits');
+    const service = createService({ registryPath: path.join(workspace, 'registry.json'), emit: () => undefined,
+      runModel: async (request) => recordMockTranscript(request, 'Ready'),
+    });
+    await service.createProject({ path: projectPath, name: 'Round limits', goal: 'Check round boundaries' });
+    for (const count of [1, 8]) expect((await service.updateProjectRounds(projectPath, count)).project.defaultDebateRounds).toBe(count);
+    for (const count of [0, 9, 1.5]) await expect(service.updateProjectRounds(projectPath, count)).rejects.toThrow('1~8');
+    expect((await service.openProject(projectPath)).project.defaultDebateRounds).toBe(8);
+  }));
   it('marks a handed-off Claude session and starts a fresh CLI session for later app chat', () => withTemporaryWorkspace(async (workspace) => {
     const projectPath = path.join(workspace, 'project');
     const calls: CliRequest[] = [];
@@ -175,6 +185,28 @@ describe('service orchestration with an injected model', () => {
     expect(followUp.events.filter((item) => item.actor === 'claude' && item.type === 'chat')).toHaveLength(3);
   }), 30_000);
 
+  it('accepts exactly 25 MiB per file and 50 MiB total with a local fake model', () => withTemporaryWorkspace(async (workspace) => {
+    const projectPath = path.join(workspace, 'project');
+    const sources = [path.join(workspace, 'boundary-a.bin'), path.join(workspace, 'boundary-b.bin')];
+    const content = Buffer.alloc(25 * 1024 * 1024, 0x41);
+    await Promise.all(sources.map((source) => writeFile(source, content)));
+    let calls = 0;
+    const service = createService({
+      registryPath: path.join(workspace, 'registry.json'), emit: () => undefined, autoStartSessions: false,
+      runModel: async (request) => {
+        calls += 1;
+        return recordMockTranscript(request, 'LOCAL_BOUNDARY_OK');
+      },
+    });
+    await service.createProject({ path: projectPath, name: 'Attachment boundary', goal: 'Local size validation only' });
+    const result = await service.sendProjectMessage(projectPath, 'Check exact attachment limits', 'codex', {}, sources);
+    const user = result.events.find((item) => item.actor === 'user' && item.type === 'chat');
+    const attachments = JSON.parse(String(user?.metadata?.attachments)) as { path: string; size: number }[];
+    expect(attachments.map((file) => file.size)).toEqual([25 * 1024 * 1024, 25 * 1024 * 1024]);
+    expect(calls).toBe(1);
+    expect(result.events.some((item) => item.actor === 'codex' && item.message === 'LOCAL_BOUNDARY_OK')).toBe(true);
+  }), 120_000);
+
   it('passes each model the other model\'s prior argument for two discussion rounds and records a conclusion', () => withTemporaryWorkspace(async (workspace) => {
     const projectPath = path.join(workspace, 'project');
     const calls: CliRequest[] = [];
@@ -198,6 +230,61 @@ describe('service orchestration with an injected model', () => {
       call.prompt.includes('codex project-discussion-1') && call.prompt.includes('claude project-discussion-1'))).toBe(true);
     expect(calls.at(-1)?.prompt).toContain('전체 토론 기록');
     expect(discussion.filter((item) => item.type === 'decision' && item.metadata?.discussionConclusion)).toHaveLength(1);
+    const oneRound = await service.sendProjectMessage(projectPath, '이번에는 한 번만 토론해', 'both', {}, [], true, 1);
+    expect(oneRound.events.filter((item) => item.type === 'chat' && item.actor === 'user').at(-1)?.metadata?.discussionRounds).toBe(1);
+    expect(calls.filter((call) => call.phase === 'project-discussion-1')).toHaveLength(4);
+    expect(calls.filter((call) => call.phase === 'project-discussion-2')).toHaveLength(2);
+    await expect(service.sendProjectMessage(projectPath, '잘못된 횟수', 'both', {}, [], true, 0)).rejects.toThrow('1~8');
+  }), 30_000);
+
+  it('ends an until-agreement discussion with both complete prior replies and remaining issues', () => withTemporaryWorkspace(async (workspace) => {
+    const projectPath = path.join(workspace, 'project');
+    const calls: CliRequest[] = [];
+    const service = createService({
+      registryPath: path.join(workspace, 'registry.json'), emit: () => undefined, autoStartSessions: false,
+      runModel: async (request) => {
+        calls.push(request);
+        const reply = request.phase === 'project-discussion-1'
+          ? `## 합의된 사항\n- 주인공 이름은 하나\n## 남은 이견\n- 마지막 장면 색감\n\n## 수정표\n${'본문'.repeat(5000)}\n| 컷 | ${request.choice.provider} 수정 |\n|---|---|\n| 200 | ${request.choice.provider} 직전표 끝 |`
+          : request.phase === 'project-discussion-2'
+            ? '## 합의된 사항\n- 주인공 이름은 하나\n- 마지막 장면은 파랑\n## 남은 이견\n- **없음** — 모델 간 설계 쟁점 기준'
+            : request.phase === 'project-discussion-conclusion'
+              ? '## 합의된 사항\n- 최종표 반영\n## 남은 이견\n- 없음'
+              : `${request.choice.provider} ${request.phase}`;
+        return recordMockTranscript(request, reply);
+      },
+    });
+    await service.createProject({ path: projectPath, name: 'Agreement', goal: 'Agree on a scene' });
+    const result = await service.sendProjectMessage(projectPath, '끝장 토론해. 코덱스가 정리해서 보고', 'both', {}, [], true, -1);
+    expect(calls.at(-1)?.choice.provider).toBe('codex');
+    const paired = calls.filter((call) => call.phase === 'project-discussion-2');
+    expect(paired.every((call) => call.prompt.includes('codex 직전표 끝') && call.prompt.includes('claude 직전표 끝'))).toBe(true);
+    expect(paired[0].prompt.match(/SHA256: ([a-f0-9]+)/u)?.[1]).toBe(paired[1].prompt.match(/SHA256: ([a-f0-9]+)/u)?.[1]);
+    expect(calls.filter((call) => /^project-discussion-\d+$/u.test(call.phase))).toHaveLength(4);
+    expect(calls.filter((call) => call.phase === 'project-discussion-2').every((call) =>
+      call.prompt.includes('우선 해결할 남은 이견') && call.prompt.includes('마지막 장면 색감')
+      && call.prompt.includes('직전 양쪽 답변 전체') && call.prompt.includes('주인공 이름은 하나'))).toBe(true);
+    expect(result.events.find((item) => item.metadata?.discussionConclusion)?.metadata?.consensusReached).toBe(true);
+  }), 30_000);
+
+  it('stops an unresolved until-agreement discussion after ten rounds', () => withTemporaryWorkspace(async (workspace) => {
+    const projectPath = path.join(workspace, 'project');
+    const calls: CliRequest[] = [];
+    const service = createService({
+      registryPath: path.join(workspace, 'registry.json'), emit: () => undefined, autoStartSessions: false,
+      runModel: async (request) => {
+        calls.push(request);
+        return recordMockTranscript(request, request.phase.startsWith('project-discussion-')
+          ? '## 합의된 사항\n- 주인공 이름은 하나\n## 남은 이견\n- 결말 장면의 색감'
+          : '첫 답변 또는 최종 요약');
+      },
+    });
+    await service.createProject({ path: projectPath, name: 'Unresolved', goal: 'Review a scene' });
+    const result = await service.sendProjectMessage(projectPath, '끝장 토론해', 'both', {}, [], true, -1);
+    expect(calls.filter((call) => /^project-discussion-\d+$/u.test(call.phase))).toHaveLength(20);
+    expect(result.events.find((item) => item.metadata?.discussionConclusion)?.metadata).toMatchObject({
+      consensusReached: false, discussionRoundsCompleted: 10,
+    });
   }), 30_000);
 
   it('runs two debate rounds, accepts a targeted follow-up, gets a second-model review, and merges approved work', () => withTemporaryWorkspace(async (workspace) => {
@@ -226,6 +313,8 @@ describe('service orchestration with an injected model', () => {
     const task = (await service.createTask(projectPath, taskInput())).tasks[0];
 
     await service.runDebate(projectPath, task.id);
+    expect(emitted.some((event) => event.taskId === task.id && event.metadata?.taskStatus === 'debating')).toBe(true);
+    expect(emitted.some((event) => event.taskId === task.id && event.metadata?.taskStatus === 'ready')).toBe(true);
     const initialDebate = calls.map(({ phase }) => phase);
     expect(initialDebate.filter((phase) => phase === 'debate-proposal')).toHaveLength(2);
     expect(initialDebate.filter((phase) => phase === 'debate-critique-1')).toHaveLength(2);
@@ -254,6 +343,8 @@ describe('service orchestration with an injected model', () => {
       .toMatchObject({ target: 'codex', additionalRounds: 1 });
 
     await service.executeTask(projectPath, task.id);
+    expect(emitted.some((event) => event.taskId === task.id && event.metadata?.taskStatus === 'reviewing')).toBe(true);
+    expect(emitted.some((event) => event.taskId === task.id && event.metadata?.taskStatus === 'approved')).toBe(true);
     const snapshot = await service.openProject(projectPath);
     expect(reviewContents).toEqual(['version one\n', 'version two\n']);
     expect(calls.filter(({ phase }) => phase.startsWith('task-')).map(({ choice, readOnly }) => [choice.provider, readOnly]))
@@ -316,7 +407,7 @@ describe('service orchestration with an injected model', () => {
       const purpose = request.phase === 'project-kickoff' ? 'project' : 'debate';
       const sessionId = sessionIds[`${purpose}:${request.choice.provider}`];
       if (!sessionId) throw new Error(`Unexpected mock phase: ${request.phase}`);
-      return { ...await recordMockTranscript(request, `${request.choice.provider} ${request.phase} answer`), sessionId };
+      return { ...await recordMockTranscript(request, `${request.choice.provider} ${request.phase} answer`), sessionId: request.sessionId ?? sessionId };
     });
     const service = createService({ registryPath: path.join(workspace, 'registry.json'), emit: () => undefined, runModel });
 
@@ -326,8 +417,8 @@ describe('service orchestration with an injected model', () => {
     expect(kickoffCalls.every(({ sessionId, readOnly, cwd }) => sessionId === undefined && readOnly && cwd === projectPath)).toBe(true);
     expect(created.project.sessions?.map(({ provider, sessionId, purpose }) => [provider, sessionId, purpose]).sort())
       .toEqual([
-        ['claude', sessionIds['project:claude'], 'project'],
-        ['codex', sessionIds['project:codex'], 'project'],
+        ['claude', sessionIds['project:claude'], 'debate'],
+        ['codex', sessionIds['project:codex'], 'debate'],
       ]);
     const projectHosts = created.project.sessions?.map(({ hostId }) => hostId) ?? [];
     expect(projectHosts).toHaveLength(2);
@@ -364,28 +455,22 @@ describe('service orchestration with an injected model', () => {
     expect((['codex', 'claude'] as const).map((provider) => perProvider(provider)
       .map(({ sessionId }) => sessionId)))
       .toEqual([
-        [undefined, ...Array(3).fill(sessionIds['debate:codex'])],
-        [undefined, ...Array(4).fill(sessionIds['debate:claude'])],
+        Array(4).fill(sessionIds['project:codex']),
+        Array(5).fill(sessionIds['project:claude']),
       ]);
 
     const snapshot = await service.openProject(projectPath);
-    expect(snapshot.tasks[0].sessions?.map(({ provider, sessionId, purpose }) => [provider, sessionId, purpose]).sort())
-      .toEqual([
-        ['claude', sessionIds['debate:claude'], 'debate'],
-        ['codex', sessionIds['debate:codex'], 'debate'],
-      ]);
-    expect(new Set(snapshot.tasks[0].sessions?.map(({ hostId }) => hostId))).toEqual(new Set(projectHosts));
+    expect(snapshot.tasks[0].sessions ?? []).toHaveLength(0);
+    expect(snapshot.project.sessions?.filter(({ hostId }) => hostId === snapshot.localHostId)).toHaveLength(2);
     expect(snapshot.events.filter(({ taskId }) => taskId === task.id)
       .filter(({ actor }) => actor === 'codex' || actor === 'claude')
-      .every(({ actor, metadata }) => metadata?.sessionId === sessionIds[`debate:${actor}`])).toBe(true);
+      .every(({ actor, metadata }) => metadata?.sessionId === sessionIds[`project:${actor}`])).toBe(true);
     const committedProject = JSON.parse(await git(projectPath, ['show', 'HEAD:.llm-collaboration/project.json'])) as { sessions?: { sessionId: string; hostId: string }[] };
     const committedTasks = JSON.parse(await git(projectPath, ['show', 'HEAD:.llm-collaboration/tasks.json'])) as { sessions?: { sessionId: string; hostId: string }[] }[];
     expect(committedProject.sessions?.map(({ sessionId }) => sessionId).sort())
       .toEqual([sessionIds['project:claude'], sessionIds['project:codex']].sort());
-    expect(committedTasks[0].sessions?.map(({ sessionId }) => sessionId).sort())
-      .toEqual([sessionIds['debate:claude'], sessionIds['debate:codex']].sort());
+    expect(committedTasks[0].sessions ?? []).toHaveLength(0);
     expect(new Set(committedProject.sessions?.map(({ hostId }) => hostId))).toEqual(new Set(projectHosts));
-    expect(new Set(committedTasks[0].sessions?.map(({ hostId }) => hostId))).toEqual(new Set(projectHosts));
 
     const otherCalls: CliRequest[] = [];
     const otherSessionIds: Record<string, string> = {
@@ -402,7 +487,7 @@ describe('service orchestration with an injected model', () => {
         const purpose = request.phase === 'project-kickoff' ? 'project' : 'debate';
         const sessionId = otherSessionIds[`${purpose}:${request.choice.provider}`];
         if (!sessionId) throw new Error(`Unexpected mock phase: ${request.phase}`);
-        return { ...await recordMockTranscript(request, `${request.choice.provider} ${request.phase} on another host`), sessionId };
+        return { ...await recordMockTranscript(request, `${request.choice.provider} ${request.phase} on another host`), sessionId: request.sessionId ?? sessionId };
       },
     });
     const openedElsewhere = await otherService.createProject({ path: projectPath, name: 'Session project', goal: 'Keep model conversations' });
@@ -416,12 +501,40 @@ describe('service orchestration with an injected model', () => {
     expect((['codex', 'claude'] as const).map((provider) => otherDebateCalls.filter(({ choice }) => choice.provider === provider)
       .map(({ sessionId }) => sessionId)))
       .toEqual([
-        [undefined, ...Array(3).fill(otherSessionIds['debate:codex'])],
-        [undefined, ...Array(4).fill(otherSessionIds['debate:claude'])],
+        Array(4).fill(otherSessionIds['project:codex']),
+        Array(5).fill(otherSessionIds['project:claude']),
       ]);
     const afterOtherHost = await otherService.openProject(projectPath);
-    expect(afterOtherHost.tasks[0].sessions?.filter(({ hostId }) => hostId === afterOtherHost.localHostId)).toHaveLength(2);
-    expect(afterOtherHost.tasks[0].sessions?.filter(({ hostId }) => hostId === created.localHostId)).toHaveLength(2);
+    expect(afterOtherHost.tasks[0].sessions ?? []).toHaveLength(0);
+    expect(afterOtherHost.project.sessions?.filter(({ hostId }) => hostId === afterOtherHost.localHostId)).toHaveLength(2);
+  }), 60_000);
+
+  it('reuses one execution and one discussion session per provider across tasks', () => withTemporaryWorkspace(async (workspace) => {
+    const projectPath = path.join(workspace, 'project');
+    const calls: CliRequest[] = [];
+    const service = createService({ registryPath: path.join(workspace, 'registry.json'), emit: () => undefined, autoStartSessions: false,
+      runModel: async (request) => {
+        calls.push(request);
+        const text = request.phase.startsWith('cross-review-') ? 'APPROVED\nThe task meets its criteria.' : `${request.choice.provider} ${request.phase} result`;
+        return { ...await recordMockTranscript(request, text), sessionId: request.sessionId ?? randomUUID() };
+      },
+    });
+    await service.createProject({ path: projectPath, name: 'Shared sessions', goal: 'Keep two chats per model' });
+    for (const title of ['First deliverable', 'Second deliverable']) {
+      const task = (await service.createTask(projectPath, taskInput({ title, debateRounds: 1 }))).tasks.at(-1)!;
+      await service.runDebate(projectPath, task.id);
+      await service.executeTask(projectPath, task.id);
+    }
+    const result = await service.openProject(projectPath);
+    expect(result.tasks.map((task) => task.status)).toEqual(['approved', 'approved']);
+    expect(result.tasks.every((task) => !task.sessions?.length)).toBe(true);
+    expect(result.project.sessions?.map(({ provider, purpose }) => `${provider}:${purpose}`).sort())
+      .toEqual(['claude:debate', 'codex:debate', 'codex:execution']);
+    const executions = calls.filter((call) => call.phase === 'task-execution');
+    expect(executions).toHaveLength(2);
+    expect(executions[0].sessionId).toBeUndefined();
+    expect(executions[1].sessionId).toBe(result.project.sessions?.find((session) => session.provider === 'codex' && session.purpose === 'execution')?.sessionId);
+    expect(new Set(executions.map((call) => call.cwd)).size).toBe(2);
   }), 60_000);
 });
 
@@ -602,6 +715,18 @@ describe('project deletion', () => {
     await rm(projectPath, { recursive: true });
     await service.forgetMissingProject(projectPath);
     expect((await service.bootstrap()).missingProjectPaths).toEqual([]);
+  }), 30_000);
+
+  it('forgets only a synthetic missing registry entry without touching project folders', () => withTemporaryWorkspace(async (workspace) => {
+    const registryPath = path.join(workspace, 'registry.json');
+    const missingPath = path.join(workspace, 'never-created-project');
+    await writeFile(registryPath, JSON.stringify([missingPath]));
+    const service = createService({ registryPath, emit: () => undefined, autoStartSessions: false });
+    expect((await service.bootstrap()).missingProjectPaths).toEqual([missingPath]);
+    await service.forgetMissingProject(missingPath);
+    expect((await service.bootstrap()).missingProjectPaths).toEqual([]);
+    expect(JSON.parse(await readFile(registryPath, 'utf8'))).toEqual([]);
+    expect(existsSync(missingPath)).toBe(false);
   }), 30_000);
 
   it('keeps an unreadable project registered and recovers it on the next scan', () => withTemporaryWorkspace(async (workspace) => {

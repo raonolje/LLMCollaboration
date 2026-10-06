@@ -76,6 +76,18 @@ describe('context carried across model calls', () => {
     expect(card).toContain('전체 원문은 프로젝트 기록에 보존됨');
   });
 
+  it('keeps both models\u2019 latest debate responses when earlier turns are long', () => {
+    const events = Array.from({ length: 9 }, (_, id) => event(id, task.id,
+      `turn-${id}-start ${'x'.repeat(2_100)} turn-${id}-end`));
+    const card = taskCard(project, task, events);
+
+    expect(card).toContain('turn-0-start');
+    expect(card).toContain('turn-7-start');
+    expect(card).toContain('turn-8-start');
+    expect(card).toContain('.llm-collaboration');
+    expect(card).toContain('events.jsonl');
+  });
+
   it('repeats stable task context through debate, execution, and review prompts', () => {
     const events = [event(1)];
     const prompts = [
@@ -90,6 +102,7 @@ describe('context carried across model calls', () => {
     expect(prompts.map((prompt) => prompt.includes(project.charter))).toEqual(Array(6).fill(true));
     expect(prompts.map((prompt) => prompt.includes(task.acceptanceCriteria[1]))).toEqual(Array(6).fill(true));
     expect(prompts.map((prompt) => prompt.includes('event-1'))).toEqual(Array(6).fill(true));
+    expect(prompts.map((prompt) => prompt.includes('한국어로'))).toEqual(Array(6).fill(true));
     expect(prompts[1]).toContain('상대 모델의 제안과 근거를 검토');
     expect(prompts[2]).toContain('상대의 직전 답변도 평가');
     expect(prompts[3]).toContain('상대의 최신 답변이 반론에 충분히 답했는지 평가');

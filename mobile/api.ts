@@ -3,10 +3,10 @@ import { Platform } from 'react-native';
 
 export type Provider = 'codex' | 'claude';
 export type Target = Provider | 'both';
-export type Project = { id: string; name: string; goal: string; path: string; charter?: string; defaultDebateRounds: number };
+export type Project = { id: string; name: string; goal: string; path: string; charter?: string; defaultDebateRounds: number; createdAt?: string };
 export type ConversationCandidate = { provider: Provider; sessionId: string; filePath: string; title: string; updatedAt: string; turnCount: number };
 export type Event = { id: string; actor: Provider | 'user' | 'system'; type: string; message: string; timestamp: string; taskId?: string; metadata?: Record<string, string | number | boolean | null> };
-export type Task = { id: string; title: string; description: string; status: string; executor: { provider: Provider; model: string }; reviewer: { provider: Provider; model: string }; debateRounds: number };
+export type Task = { id: string; title: string; description: string; status: string; executor: { provider: Provider; model: string }; reviewer: { provider: Provider; model: string }; debateRounds: number; debateSummary?: string; updatedAt?: string };
 export type Snapshot = { project: Project; tasks: Task[]; events: Event[] };
 export type Catalog = { provider: Provider; models: { id: string; label: string; efforts: string[]; defaultEffort?: string; requiresCredits?: boolean }[] };
 export type Connection = { url: string; token: string };

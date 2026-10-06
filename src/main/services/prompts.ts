@@ -15,7 +15,7 @@ export const projectChatGuidance = (events: readonly CollaborationEvent[], recip
     .map((event) => `[${event.timestamp}] ${compact(event.message, 2000)}${typeof event.metadata?.attachments === 'string' ? `\n첨부 파일: ${event.metadata.attachments}` : ''}`)
     .join('\n\n') || '추가 지시 없음';
 
-export const taskCard = (project: Project, task: Task, events: readonly CollaborationEvent[], recipient: Provider): string => {
+export const taskCard = (project: Project, task: Task, events: readonly CollaborationEvent[], recipient: Provider, includeRecent = true): string => {
   const sharedAttachments = events.filter((event) => event.type === 'chat' && event.actor === 'user' && typeof event.metadata?.attachments === 'string')
     .slice(-12).flatMap((event) => {
       try {
@@ -30,10 +30,10 @@ export const taskCard = (project: Project, task: Task, events: readonly Collabor
       .map((file) => `${event.actor} 산출물: ${path.join(project.path, file)}`));
   const activeWorktrees = events.filter((event) => event.type === 'execution' && event.taskId && event.metadata?.branch)
     .slice(-5).map((event) => `${event.actor} 진행 중 작업 폴더 (읽기만): ${taskWorktree(project.path, project.id, String(event.taskId))}`);
-  const relevant = events
+  const relevant = (includeRecent ? events : [])
     .filter((event) => event.taskId === task.id)
-    .slice(-28)
-    .map((event) => `[${event.timestamp}] ${event.actor}/${event.type}${event.round ? `/${event.round}회차` : ''}: ${compact(event.message, 2200)}`)
+    .slice(-12)
+    .map((event) => `[${event.timestamp}] ${event.actor}/${event.type}${event.round ? `/${event.round}회차` : ''}: ${compact(event.message, 1400)}`)
     .join('\n\n');
   return [
     '## 변하지 않는 프로젝트 기준',
@@ -63,7 +63,8 @@ export const taskCard = (project: Project, task: Task, events: readonly Collabor
     '## 가져온 대화의 작업 맥락',
     compact(task.sourceContext || '연결된 대화 없음', 28_000),
     '## 이 업무의 최근 원문 기록',
-    compact(relevant || '기록 없음', 10_000),
+    relevant || '기록 없음',
+    `원문 전체: ${path.join(project.path, '.llm-collaboration', 'events.jsonl')}`,
     '위 프로젝트 기준과 업무 카드는 매 요청마다 다시 전달됩니다. 최근 기록은 맥락이며, 원문 전체는 프로젝트 기록에 보존됩니다.',
   ].join('\n\n');
 };
@@ -76,6 +77,7 @@ export const debatePrompt = (
   stage: 'proposal' | 'critique' | 'response' | 'evaluation' | 'followUp',
   round?: number,
   question?: string,
+  fullContext?: string,
 ): string => {
   const actions = {
     proposal: '독립적으로 업무 접근법을 제안하세요. 핵심 결정, 근거, 예상 실패 조건, 검증 방법을 명시하세요.',
@@ -86,15 +88,18 @@ export const debatePrompt = (
   } as const;
   return [
     `당신은 ${provider}입니다. 다른 모델과 함께 같은 업무의 계획을 논쟁합니다.`,
+    '사용자와 상대 모델이 읽을 수 있도록 한국어로 답하세요. 고유명사·가사·입력문처럼 필요한 원문은 그대로 보존하세요.',
     '작업 폴더를 수정하지 마세요. 근거 없는 합의나 상대 입장 추측을 피하세요.',
     `현재 단계: ${stage}${round ? `, ${round}회차` : ''}`,
     actions[stage],
-    taskCard(project, task, events, provider),
+    taskCard(project, task, events, provider, !fullContext),
+    fullContext ?? '',
   ].join('\n\n');
 };
 
 export const executionPrompt = (project: Project, task: Task, events: readonly CollaborationEvent[]): string => [
   '당신은 이 업무의 실행 담당자입니다. 아래 업무를 실제 파일에 구현하세요.',
+  '최종 보고와 설명은 한국어로 작성하세요. 고유명사·가사·입력문처럼 필요한 원문은 그대로 보존하세요.',
   '현재 작업 폴더는 해당 업무 전용 Git worktree입니다. 프로젝트의 .llm-collaboration 폴더는 앱의 기록이므로 수정하지 마세요.',
   '완료 기준을 하나씩 충족하고 필요한 검증을 실행하세요. 다른 업무나 프로젝트 폴더 외부 파일은 수정하지 마세요.',
   '마지막 답변에는 수행 내용, 검증 명령과 결과, 미완료 항목, 수정 파일을 명시하세요.',
@@ -109,6 +114,7 @@ export const reviewPrompt = (
   executionSummary: string,
 ): string => [
   '당신은 다른 모델이 구현한 결과의 독립 검수자입니다. 파일을 수정하지 마세요.',
+  '검수 결과는 한국어로 작성하세요. 고유명사·가사·입력문처럼 필요한 원문은 그대로 보존하세요.',
   '완료 기준마다 실제 코드나 산출물의 증거를 확인하세요. 중요한 문제만 지적하세요.',
   '첫 줄에는 반드시 `APPROVED` 또는 `CHANGES_REQUESTED` 중 하나만 쓰세요.',
   '그 뒤에 기준별 평가, 파일 경로와 근거, 필요한 수정 사항을 적으세요.',

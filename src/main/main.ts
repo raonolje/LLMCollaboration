@@ -36,8 +36,8 @@ const createWindow = (): BrowserWindow => {
   const window = new BrowserWindow({
     width: 1500,
     height: 960,
-    minWidth: 1050,
-    minHeight: 720,
+    minWidth: 720,
+    minHeight: 560,
     backgroundColor: '#10141c',
     title: 'LLM Collaboration',
     icon: path.join(app.getAppPath(), 'assets', 'icon.png'),
@@ -51,6 +51,15 @@ const createWindow = (): BrowserWindow => {
   });
 
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  window.webContents.on('before-input-event', (event, input) => {
+    if (!(process.platform === 'darwin' ? input.meta : input.control) || input.alt) return;
+    const key = input.key.toLowerCase();
+    if (!['+', '=', 'add', '-', '_', 'subtract', '0'].includes(key)) return;
+    event.preventDefault();
+    const current = window.webContents.getZoomFactor();
+    const next = key === '0' ? 1 : Math.min(2, Math.max(1, Math.round(current * 4 + (['+', '=', 'add'].includes(key) ? 1 : -1)) / 4));
+    window.webContents.setZoomFactor(next);
+  });
   if (process.platform !== 'darwin') window.setMenuBarVisibility(false);
   window.webContents.on('will-navigate', (event) => event.preventDefault());
 
@@ -128,7 +137,7 @@ const registerHandlers = (): void => {
     const result = mainWindow ? await dialog.showOpenDialog(mainWindow, options) : await dialog.showOpenDialog(options);
     return result.canceled ? [] : result.filePaths;
   });
-  ipcMain.handle('collab:sendProjectMessage', (_event, projectPath, message, target, models, files, discussion) => service.sendProjectMessage(projectPath, message, target, models, files, discussion));
+  ipcMain.handle('collab:sendProjectMessage', (_event, projectPath, message, target, models, files, discussion, discussionRounds) => service.sendProjectMessage(projectPath, message, target, models, files, discussion, discussionRounds));
   ipcMain.handle('collab:continueProjectDiscussion', (_event, projectPath, messageId) => service.continueProjectDiscussion(projectPath, messageId));
   ipcMain.handle('collab:cancelProjectMessage', (_event, projectPath) => service.cancelProjectMessage(projectPath));
   ipcMain.handle('collab:listLocalConversations', (_event, target?: LaunchRequest) => service.listLocalConversations(target));

@@ -219,9 +219,11 @@ export const createRemote = (service: Service, userData: string, options: { addr
           || typeof file.name !== 'string' || typeof file.data !== 'string')) throw new Error('첨부 파일은 최대 5개입니다.');
         const chatMessage = files.length && !String(body.message ?? '').trim() ? '' : text(body.message);
         const discussion = body.discussion === true;
-        json(response, 202, launch('chat', id, () => files.length || discussion
-          ? service.sendProjectMessage(directory, chatMessage, chatTarget, selected, files, discussion)
-          : service.sendProjectMessage(directory, chatMessage, chatTarget, selected), { target: chatTarget })); return;
+        const discussionRounds = body.discussionRounds === undefined ? undefined : Number(body.discussionRounds);
+        json(response, 202, launch('chat', id, () => discussionRounds !== undefined
+          ? service.sendProjectMessage(directory, chatMessage, chatTarget, selected, files, discussion, discussionRounds)
+          : files.length || discussion ? service.sendProjectMessage(directory, chatMessage, chatTarget, selected, files, discussion)
+            : service.sendProjectMessage(directory, chatMessage, chatTarget, selected), { target: chatTarget })); return;
       }
       if (action === 'cancel-chat') { await service.cancelProjectMessage(directory); json(response, 200, { ok: true }); return; }
       if (action === 'tasks' && segments.length === 4) {

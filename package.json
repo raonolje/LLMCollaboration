@@ -1,6 +1,6 @@
 {
   "name": "llm-collaboration",
-  "version": "0.5.7",
+  "version": "0.5.18",
   "private": true,
   "description": "구독형 CLI 기반 로컬 LLM 협업 앱",
   "main": "dist-electron/main/main.js",
@@ -9,19 +9,24 @@
     "build": "npm run typecheck && npm run build:main && vite build && npm run build:mobile-web",
     "build:mobile-web": "npm run export:web --prefix mobile",
     "build:main": "tsc -p tsconfig.main.json",
-    "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
+    "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit && npm run typecheck:mobile",
     "test": "vitest run",
     "icons:png": "node scripts/build-icons.mjs",
     "start": "electron .",
     "package:win": "npm run build && electron-builder --win --publish never",
-    "package:mac": "npm run build && electron-builder --mac --publish never"
+    "package:mac": "npm run build && electron-builder --mac --publish never",
+    "typecheck:mobile": "npm run typecheck --prefix mobile"
   },
   "dependencies": {
     "cross-spawn": "^7.0.6",
     "node-pty": "^1.1.0",
     "qrcode": "^1.5.4",
     "react": "^19.3.0",
-    "react-dom": "^19.3.0"
+    "react-dom": "^19.3.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "unified": "^11.0.5",
+    "remark-parse": "^11.0.0"
   },
   "devDependencies": {
     "@types/cross-spawn": "^6.0.6",
