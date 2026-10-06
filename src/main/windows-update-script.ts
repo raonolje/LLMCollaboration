@@ -23,6 +23,17 @@ function Hash([string]$file) {
 function Unlocked([string]$file) {
   try { $handle=[IO.File]::Open($file,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::None);$handle.Dispose();return $true } catch {return $false}
 }
+function ReplaceExecutable([string]$from,[string]$to) {
+  $deadline=[DateTime]::UtcNow.AddSeconds(15)
+  do {
+    try {[IO.File]::Replace($from,$to,[NullString]::Value);return}
+    catch {
+      $code=$_.Exception.GetBaseException().HResult -band 65535
+      if($code -notin @(32,33) -or [DateTime]::UtcNow -gt $deadline){throw}
+      Start-Sleep -Milliseconds 200
+    }
+  } while($true)
+}
 try {
   if ($folder -ne [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Manifest)) -or $update.nonce -notmatch '^[0-9a-f-]{36}$' -or $source -eq $target -or $target -notmatch '^[A-Za-z]:\\' -or $source -notmatch '^[A-Za-z]:\\') {throw 'Invalid update paths'}
   $updatesRoot=[IO.Path]::GetFullPath($update.updatesDirectory) + [IO.Path]::DirectorySeparatorChar
@@ -63,7 +74,7 @@ try {
   if($update.portable){
     Copy-Item -LiteralPath $source -Destination $staged
     if((Hash $staged) -ne $update.sha256){throw 'Staged executable verification failed'}
-    [IO.File]::Replace($staged,$target,(Join-Path $backup 'replaced.exe'));$swapped=$true
+    ReplaceExecutable $staged $target;$swapped=$true
     if((Hash $target) -ne $update.sha256){throw 'Installed executable verification failed'}
   } else {
     $swapped=$true
@@ -93,7 +104,7 @@ try {
       }
       $deadline=[DateTime]::UtcNow.AddSeconds(30)
       while(-not (Unlocked $target)){if([DateTime]::UtcNow -gt $deadline){throw 'Rollback is waiting for normal exit; backup was preserved'};Start-Sleep -Milliseconds 200}
-      if($update.portable){Copy-Item -LiteralPath $oldExe -Destination $staged;[IO.File]::Replace($staged,$target,(Join-Path $backup 'failed-update.exe'))}
+      if($update.portable){Copy-Item -LiteralPath $oldExe -Destination $staged;ReplaceExecutable $staged $target}
       else {Get-ChildItem -LiteralPath (Join-Path $backup 'installed-app') | ForEach-Object {Copy-Item -LiteralPath $_.FullName -Destination ([IO.Path]::GetDirectoryName($target)) -Recurse -Force}}
       if((Hash $target) -ne $update.targetHash){throw 'Rollback executable verification failed'}
       Remove-Item Env:LLM_COLLAB_UPDATE_HANDOFF -ErrorAction SilentlyContinue
