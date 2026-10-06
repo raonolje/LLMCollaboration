@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type SetStateAction } from 'react';
 import QRCode from 'qrcode';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import { MarkdownText } from './MarkdownText';
+import { ChatDraftField, type ChatDraftHandle } from './ChatDraftField';
+import { PendingReply } from './PendingReply';
 import type {
   AssignmentMode,
   AppUpdateCheck,
@@ -43,7 +44,6 @@ const chatAttachments = (event: CollaborationEvent): ChatAttachment[] => {
 };
 const pendingFileName = (file: ChatFileInput): string => typeof file === 'string' ? file.split(/[\\/]/u).at(-1) ?? file : file.name;
 const attachmentSizeLabel = (size: number): string => size < 1024 ? `${size}B` : size < 1024 * 1024 ? `${(size / 1024).toFixed(1)}KB` : `${(size / (1024 * 1024)).toFixed(1)}MB`;
-const durationLabel = (seconds: number): string => `${Math.floor(seconds / 60)}분 ${String(seconds % 60).padStart(2, '0')}초`;
 const encodeBrowserFile = (file: File): Promise<ChatFileInput> => new Promise((resolve, reject) => {
   if (file.size > 25 * 1024 * 1024) { reject(new Error('첨부 파일은 각각 25MB 이하여야 합니다.')); return; }
   const reader = new FileReader();
@@ -117,20 +117,12 @@ function Empty({ icon, title, detail }: { icon: string; title: string; detail: s
   return <div className="empty"><div className="empty-icon">{icon}</div><strong>{title}</strong><span>{detail}</span></div>;
 }
 
-function MarkdownText({ text }: { text: string }) {
-  return <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{
-    a: ({ children, href }) => <span className="markdown-link" title={href}>{children} {href && <small>({href})</small>}</span>,
-    table: ({ children }) => <div className="markdown-table-scroll" tabIndex={0} role="region" aria-label="표 · 좌우 스크롤"><table>{children}</table></div>,
-    img: ({ alt }) => <span className="markdown-image">🖼 {alt || '이미지'}</span>,
-  }}>{text}</ReactMarkdown></div>;
-}
-
 function DebateSummaryPanel({ conclusion, onIssue, onRead }: {
   conclusion?: CollaborationEvent;
   onIssue: (issue: string) => void;
   onRead: (event: CollaborationEvent) => void;
 }) {
-  const summary = conclusion ? parseDebateSummary(conclusion.message) : null;
+  const summary = useMemo(() => conclusion ? parseDebateSummary(conclusion.message) : null, [conclusion?.message]);
   const groups = [
     { key: 'agreements' as const, title: '서로 동의한 점', empty: '구분된 합의 기록이 없습니다.' },
     { key: 'disagreements' as const, title: '남은 이견', empty: '구분된 이견 기록이 없습니다.' },
@@ -233,7 +225,15 @@ export default function App() {
   const [runningTaskIds, setRunningTaskIds] = useState<ReadonlySet<string>>(() => new Set());
   const [cancelBusy, setCancelBusy] = useState(false);
   const [cliBusy, setCliBusy] = useState<Provider | 'refresh' | null>(null);
-  const [chatDraft, setChatDraft] = useState('');
+  const chatDraftValue = useRef('');
+  const chatDraftField = useRef<ChatDraftHandle>(null);
+  const [chatHasDraft, setChatHasDraft] = useState(false);
+  const setChatDraft = (next: SetStateAction<string>): void => {
+    const value = typeof next === 'function' ? next(chatDraftValue.current) : next;
+    chatDraftValue.current = value;
+    chatDraftField.current?.setValue(value);
+    setChatHasDraft(Boolean(value.trim()));
+  };
   const [composerOpen, setComposerOpen] = useState(true);
   const [expandedRecordIds, setExpandedRecordIds] = useState<string[]>([]);
   const [chatFiles, setChatFiles] = useState<ChatFileInput[]>([]);
@@ -242,8 +242,6 @@ export default function App() {
   const [chatDiscussionRounds, setChatDiscussionRounds] = useState(2);
   const [taskDiscussionId, setTaskDiscussionId] = useState<string | null>(null);
   const [discussingMessageId, setDiscussingMessageId] = useState<string | null>(null);
-  const [clockMs, setClockMs] = useState(() => Date.now());
-  useEffect(() => { const timer = setInterval(() => setClockMs(Date.now()), 1000); return () => clearInterval(timer); }, []);
   const [chatTarget, setChatTarget] = useState<Provider | 'both'>('both');
   const [debateScope, setDebateScope] = useState<'project' | 'task'>('project');
   const [projectDiscussionId, setProjectDiscussionId] = useState('');
@@ -315,9 +313,11 @@ export default function App() {
     () => events.filter((event) => event.taskId === selectedDebateTask?.id && debateTypes.includes(event.type)),
     [events, selectedDebateTask?.id],
   );
-  const projectDiscussions = useMemo(() => events.filter((record) => record.type === 'chat' && record.actor === 'user'
-    && events.some((reply) => reply.metadata?.replyTo === record.id
-      && (typeof reply.metadata?.discussionRound === 'number' || reply.metadata?.discussionConclusion === true))), [events]);
+  const projectDiscussions = useMemo(() => {
+    const requestIds = new Set(events.filter((reply) => typeof reply.metadata?.discussionRound === 'number'
+      || reply.metadata?.discussionConclusion === true).map((reply) => reply.metadata?.replyTo));
+    return events.filter((record) => record.type === 'chat' && record.actor === 'user' && requestIds.has(record.id));
+  }, [events]);
   const selectedProjectDiscussion = projectDiscussions.find((record) => record.id === projectDiscussionId) ?? projectDiscussions.at(-1);
   const projectDebateEvents = useMemo(() => selectedProjectDiscussion
     ? [selectedProjectDiscussion, ...events.filter((record) => record.metadata?.replyTo === selectedProjectDiscussion.id
@@ -331,7 +331,20 @@ export default function App() {
       .forEach((conclusion) => latest.set(String(conclusion.metadata?.replyTo ?? ''), conclusion));
     return [...latest.entries()].map(([id, conclusion]) => ({ conclusion, request: requests.get(id) }))
       .filter((group): group is { conclusion: CollaborationEvent; request: CollaborationEvent } => !!group.request)
+      .map((group) => ({ ...group, summary: parseDebateSummary(group.conclusion.message) }))
       .reverse();
+  }, [events]);
+  const chatTimings = useMemo(() => {
+    const requests = new Map(events.map((event) => [event.id, event]));
+    const typical = (provider: Provider): number => {
+      const samples = events.filter((item) => item.actor === provider && item.type === 'chat' && item.metadata?.replyTo)
+        .map((item) => {
+          const request = requests.get(String(item.metadata?.replyTo));
+          return request ? Math.floor((Date.parse(item.timestamp) - Date.parse(request.timestamp)) / 1000) : 0;
+        }).filter((seconds) => seconds >= 2 && seconds <= 3600).slice(-5).sort((left, right) => left - right);
+      return samples.length ? samples[Math.floor(samples.length / 2)] : 0;
+    };
+    return { codex: typical('codex'), claude: typical('claude') };
   }, [events]);
   const recentEvents = useMemo(() => [...events].reverse().slice(0, 5), [events]);
   const searchDisplay = useMemo(() => [...(searchResults ?? events)].reverse(), [searchResults, events]);
@@ -882,9 +895,9 @@ export default function App() {
 
   const sendChat = (submitEvent: FormEvent<HTMLFormElement>): void => {
     submitEvent.preventDefault();
-    if (!project || (!chatDraft.trim() && !chatFiles.length) || chatSending) return;
+    if (!project || (!chatDraftValue.current.trim() && !chatFiles.length) || chatSending) return;
     const projectPath = project.path;
-    const message = chatDraft.trim();
+    const message = chatDraftValue.current.trim();
     const target = chatTarget;
     const models = { ...chatModels };
     const files = [...chatFiles];
@@ -898,10 +911,10 @@ export default function App() {
   };
 
   const requestChatTask = (): void => {
-    if (!project || !chatDraft.trim() || chatSending) return;
+    if (!project || !chatDraftValue.current.trim() || chatSending) return;
     if (chatTarget === 'both') { notify('업무 담당 모델을 Codex만 또는 Claude만으로 선택해 주세요.', true); return; }
     const projectPath = project.path;
-    const message = chatDraft.trim();
+    const message = chatDraftValue.current.trim();
     const files = [...chatFiles];
     const executor = chatTarget;
     const reviewer: Provider = executor === 'codex' ? 'claude' : 'codex';
@@ -1009,7 +1022,7 @@ export default function App() {
       onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setChatDragActive(false); }}
       onDrop={dropChatFiles}>
       <button type="button" className="chat-dock-toggle" aria-expanded={composerOpen} onClick={() => setComposerOpen((open) => !open)}>
-        {composerOpen ? '대화 입력 접기 ▾' : `대화 입력 열기 ▴${chatDraft.trim() ? ' · 작성 중' : ''}`}
+        {composerOpen ? '대화 입력 접기 ▾' : `대화 입력 열기 ▴${chatHasDraft ? ' · 작성 중' : ''}`}
       </button>
       {chatDragActive && <div className="chat-drop-hint" aria-hidden="true">이미지·파일을 놓아 첨부하기</div>}
       {composerOpen && (
@@ -1019,7 +1032,7 @@ export default function App() {
           {([{ value: 'both', label: '두 모델 모두' }, { value: 'codex', label: 'Codex만' }, { value: 'claude', label: 'Claude만' }] as const).map(({ value, label }) => <button type="button" key={value} className={'button ' + (chatTarget === value ? 'primary' : '')} aria-pressed={chatTarget === value} onClick={() => setChatTarget(value)}>{label}</button>)}
         </div>
         {taskDiscussionId && <div className="chat-source-note">선택한 토론의 최종 결론을 업무에 연결합니다. <button className="button ghost small" type="button" onClick={() => setTaskDiscussionId(null)}>연결 해제</button></div>}
-        <div className="field"><label htmlFor="project-chat-input">메시지</label><textarea id="project-chat-input" value={chatDraft} maxLength={20_000} rows={2} onChange={(event) => setChatDraft(event.target.value)} onPaste={pasteChatFiles} placeholder="모든 탭에서 지시 입력 · 이미지 드래그 또는 Ctrl+V 붙여넣기" /></div>
+        <ChatDraftField ref={chatDraftField} draft={chatDraftValue} onHasDraft={setChatHasDraft} onPaste={pasteChatFiles} />
         <details className="chat-compose-settings"><summary>모델·추론·토론 설정</summary>
         <div className="chat-model-heading"><strong>모델과 추론 수준</strong><button className="button ghost small" type="button" disabled={modelBusy} onClick={() => void refreshModelCatalogs()}>{modelBusy ? '목록 확인 중…' : '↻ 모델 목록 새로고침'}</button></div>
         <div className="form-grid chat-models">{(['codex', 'claude'] as Provider[]).map((provider) => {
@@ -1046,7 +1059,7 @@ export default function App() {
           if (current.length + chosen.length > 5) { notify('첨부 파일은 최대 5개입니다. 선택한 파일은 추가하지 않았습니다.', true); return current; }
           return [...current, ...chosen];
         })).catch((error: unknown) => notify(errorText(error), true))}>＋ 이미지·파일 첨부</button>{chatFiles.map((file, index) => <button className="button ghost small" type="button" key={`${pendingFileName(file)}-${index}`} title={pendingFileName(file)} onClick={() => setChatFiles((current) => current.filter((_, position) => position !== index))}>📎 {pendingFileName(file)} ×</button>)}</div>
-        <div className="chat-compose-actions"><span className="subtle">첨부 파일은 프로젝트 Git에 저장됩니다. 업무는 Codex만 또는 Claude만을 선택해 각각 요청하세요. 완료되면 상대 모델이 검수합니다. 파일당 25MB, 총 50MB · 5개까지.</span><div className="session-actions">{chatSending && <button className="button danger" type="button" onClick={() => project && void window.collab.cancelProjectMessage(project.path)}>응답 중단</button>}<button className="button" type="button" disabled={!chatDraft.trim() || chatSending || chatTarget === 'both'} onClick={requestChatTask}>선택한 모델에 업무 요청</button><button className="button primary" type="submit" disabled={(!chatDraft.trim() && !chatFiles.length) || chatSending}>{chatSending ? '진행 중…' : '메시지 보내기'}</button></div></div>
+        <div className="chat-compose-actions"><span className="subtle">첨부 파일은 프로젝트 Git에 저장됩니다. 업무는 Codex만 또는 Claude만을 선택해 각각 요청하세요. 완료되면 상대 모델이 검수합니다. 파일당 25MB, 총 50MB · 5개까지.</span><div className="session-actions">{chatSending && <button className="button danger" type="button" onClick={() => project && void window.collab.cancelProjectMessage(project.path)}>응답 중단</button>}<button className="button" type="button" disabled={!chatHasDraft || chatSending || chatTarget === 'both'} onClick={requestChatTask}>선택한 모델에 업무 요청</button><button className="button primary" type="submit" disabled={(!chatHasDraft && !chatFiles.length) || chatSending}>{chatSending ? '진행 중…' : '메시지 보내기'}</button></div></div>
       </form>
       )}
     </div>
@@ -1071,18 +1084,12 @@ export default function App() {
             || (item.actor === 'user' && (item.metadata?.target === 'both' || item.metadata?.target === provider))
             || (item.type === 'error' && item.metadata?.provider === provider));
           const latestRequest = visible.filter((item) => item.actor === 'user' && item.type === 'chat').at(-1);
-          const pending = !!latestRequest && clockMs - Date.parse(latestRequest.timestamp) < 60 * 60_000
+          const pending = !!latestRequest
             && (latestRequest.metadata?.discussion || discussingMessageId === latestRequest.id
               ? !events.some((item) => item.metadata?.replyTo === latestRequest.id && item.metadata?.discussionConclusion)
               : !events.some((item) => item.metadata?.replyTo === latestRequest.id
                 && (item.actor === provider || item.type === 'error' && item.metadata?.provider === provider)));
-          const elapsed = latestRequest ? Math.max(0, Math.floor((clockMs - Date.parse(latestRequest.timestamp)) / 1000)) : 0;
-          const samples = events.filter((item) => item.actor === provider && item.type === 'chat' && item.metadata?.replyTo)
-            .map((item) => {
-              const request = events.find((candidate) => candidate.id === item.metadata?.replyTo);
-              return request ? Math.floor((Date.parse(item.timestamp) - Date.parse(request.timestamp)) / 1000) : 0;
-            }).filter((seconds) => seconds >= 2 && seconds <= 3600).slice(-5).sort((left, right) => left - right);
-          const typical = samples.length ? samples[Math.floor(samples.length / 2)] : 0;
+          const typical = chatTimings[provider];
           const discussionReplies = latestRequest ? events.filter((item) => item.metadata?.replyTo === latestRequest.id && typeof item.metadata?.discussionRound === 'number') : [];
           const completedRound = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].filter((round) => ['codex', 'claude'].every((name) =>
             discussionReplies.some((item) => item.actor === name && item.metadata?.discussionRound === round))).at(-1) ?? 0;
@@ -1098,15 +1105,14 @@ export default function App() {
                   && <button className="button small" type="button" disabled={chatSending} onClick={() => continueChatDiscussion(item.id)}>이 두 답변으로 토론 시작</button>}
                 <div className="chat-message-actions">{item.message.length > 280 && <button className="button ghost small" type="button" onClick={() => toggleRecord(item.id)}>{expandedRecordIds.includes(item.id) ? '접기' : '펼치기'}</button>}<button className="button ghost small" type="button" onClick={() => { setExpandedChat(item); setDialog('chat-message'); }}>전체 보기</button>{item.metadata?.transcript && <button className="button ghost small" type="button" onClick={() => openTranscript(item)}>CLI 원문</button>}</div>
               </article>) : <Empty icon="◎" title="아직 대화가 없습니다" detail={`${providerLabel(provider)}에게 첫 메시지를 보내세요.`} />}
-              {pending && <article className="chat-message from-model pending" role="status"><strong>{providerLabel(provider)} 생각 중 · 응답 생성 중…</strong><div className="chat-message-text">{latestRequest?.metadata?.discussion || discussingMessageId === latestRequest?.id ? latestRequest?.metadata?.discussionRounds === -1 ? `끝장 토론 ${completedRound + 1}회차 · ` : `토론 ${Math.min(completedRound + 1, Number(latestRequest?.metadata?.discussionRounds ?? project?.defaultDebateRounds ?? 2))} / ${Number(latestRequest?.metadata?.discussionRounds ?? project?.defaultDebateRounds ?? 2)}회차 · ` : ''}경과 {durationLabel(elapsed)} · {typical ? elapsed < typical ? `최근 응답 기준 예상 약 ${durationLabel(typical - elapsed)} 남음` : '최근 응답보다 오래 걸리는 중' : '완료 기록이 쌓이면 남은 시간을 예측합니다.'}<br />답변이 완성되면 자동으로 표시됩니다.</div></article>}
+              {pending && latestRequest && <PendingReply key={latestRequest.id} provider={provider} request={latestRequest} discussion={Boolean(latestRequest.metadata?.discussion || discussingMessageId === latestRequest.id)} completedRound={completedRound} defaultRounds={project?.defaultDebateRounds ?? 2} typical={typical} />}
             </div>
           </section>;
         })}
       </div>
       <section className="panel panel-pad discussion-results" aria-label="요청별 토론 최종 결과">
         <div className="panel-head"><div><h2>토론 최종 결과</h2><p className="subtle">지시마다 토론이 끝난 결론만 묶었습니다. 결론을 보고 모델별 업무를 바로 지시할 수 있습니다.</p></div><span className="badge neutral">{discussionResults.length}개 결론</span></div>
-        {discussionResults.length ? <div className="discussion-result-list">{discussionResults.map(({ request, conclusion }) => {
-          const summary = parseDebateSummary(conclusion.message);
+        {discussionResults.length ? <div className="discussion-result-list">{discussionResults.map(({ request, conclusion, summary }) => {
           return <details className="discussion-result" key={request.id}><summary><span className="discussion-result-title">{request.message.slice(0, 140) || '첨부 파일 토론'}</span><span className="subtle">{request.metadata?.discussionRounds === -1 ? `끝장 토론 ${conclusion.metadata?.discussionRoundsCompleted ?? 0}회 · ${consensusLabel(conclusion.metadata)}` : `${request.metadata?.discussionRounds ?? project?.defaultDebateRounds ?? 2}회 왕복 · ${consensusLabel(conclusion.metadata)}`} · {shortTime(conclusion.timestamp)} · 펼치기</span><div className="discussion-result-preview">{conclusion.metadata?.consensusReached === true ? '확인된 합의: ' : '결과 요약: '}<MarkdownText text={summary.agreements[0] ?? conclusion.message.slice(0, 160)} /></div></summary>
             <div className="discussion-result-body"><div className="discussion-result-summary">{([{ title: '합의', items: summary.agreements }, { title: '남은 이견', items: summary.disagreements }, { title: '다음 지시·검증', items: summary.nextSteps }] as const).map(({ title, items }) => <div key={title}><h3>{title}</h3>{items.length ? <ul>{items.slice(0, 4).map((item, index) => <li key={index}><MarkdownText text={item} /></li>)}</ul> : <p className="subtle">기록 없음</p>}</div>)}</div>
               <div className="session-actions"><button className="button small" type="button" onClick={() => { setExpandedChat(conclusion); setDialog('chat-message'); }}>결론 전체 보기</button><button className="button small" type="button" onClick={() => instructFromConclusion(conclusion, 'codex')}>Codex 업무 지시</button><button className="button small" type="button" onClick={() => instructFromConclusion(conclusion, 'claude')}>Claude 업무 지시</button></div>
@@ -1281,7 +1287,7 @@ export default function App() {
   );
 
   return <div className="app-shell">
-    <aside className="sidebar">
+    <aside className="sidebar" aria-label="프로젝트 내비게이션" tabIndex={0}>
       <div className="brand"><div className="brand-symbol"><img src={appIcon} alt="" /></div><span>LLM Collaboration</span></div>
       <div className="side-projects">
         <div className="side-label">프로젝트 <button className="cli-refresh" type="button" disabled={!!busy} onClick={() => void perform('프로젝트 다시 찾는 중', () => reloadRegisteredProjects())}>↻ 다시 찾기</button></div>
@@ -1309,7 +1315,7 @@ export default function App() {
     <div className={`main${project ? ` has-chat-dock${composerOpen ? '' : ' collapsed'}` : ''}`}>
       <header className="topbar"><div className="breadcrumbs">프로젝트 <span> / </span><strong>{project?.name ?? '시작하기'}</strong></div><div className="topbar-actions"><span className={'topbar-note ' + (busy || runningTaskIds.size ? 'busy' : '')}>{busy ? '◌ ' + busy + '…' : runningTaskIds.size ? `◌ 업무 ${runningTaskIds.size}개 실행 중` : '로컬 CLI · 로컬 기록 · Git'}</span><button className="button small" type="button" disabled={remoteBusy} onClick={openRemote}>{remoteBusy ? '모바일 연결 중…' : '모바일 연결'}</button><button className="button small" type="button" disabled={updateBusy} onClick={() => void checkForUpdate()}>{updateBusy ? '업데이트 확인 중…' : '앱 업데이트'}</button>{project && <button className="button small" onClick={() => void perform('새로고침 중', async () => refresh(project.path))} disabled={!!busy}>↻ 새로고침</button>}</div></header>
       {toast && <div className={'toast ' + (toast.error ? 'error ' : '') + (dialog || remoteOpen || updateCheck ? 'in-modal' : '')} role={toast.error ? 'alert' : 'status'}><span>{toast.message}</span><button type="button" aria-label="알림 닫기" onClick={() => setToast(null)}>×</button></div>}
-      <main className="content">
+      <main className="content" aria-label="프로젝트 본문" tabIndex={0}>
         {project ? <>
           <div className="page-head"><div><div className="eyebrow">WORKSPACE</div><h1>{project.name}</h1><p className="subtle">{project.goal || '프로젝트 목표를 바탕으로 두 모델이 계획하고 검수합니다.'}</p></div><div className="page-actions"><button className="button danger" type="button" disabled={!!busy || runningTaskIds.size > 0} onClick={() => { setDeleteConfirmation(''); setDialog('delete-project'); }}>프로젝트 삭제</button><button className="button" onClick={() => setTab('history')}>이력 검색</button><button className="button primary" onClick={() => openTaskDialog()}>＋ 새 업무</button></div></div>
           <nav className="tabs" aria-label="프로젝트 화면"><button className={'tab ' + (tab === 'chat' ? 'active' : '')} onClick={() => setTab('chat')}>채팅</button><button className={'tab ' + (tab === 'overview' ? 'active' : '')} onClick={() => setTab('overview')}>개요</button><button className={'tab ' + (tab === 'tasks' ? 'active' : '')} onClick={() => setTab('tasks')}>업무 <span className="tab-count">{tasks.length}</span></button><button className={'tab ' + (tab === 'debate' ? 'active' : '')} onClick={() => setTab('debate')}>논쟁</button><button className={'tab ' + (tab === 'history' ? 'active' : '')} onClick={() => setTab('history')}>전체 이력</button></nav>
