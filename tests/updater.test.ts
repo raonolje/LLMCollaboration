@@ -1,21 +1,36 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
+import { EventEmitter } from 'node:events';
+import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, readdir, rm, mkdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { UpdateGate } from '../src/main/update-gate';
 import { downloadAppUpdate, validAsset } from '../src/main/updater';
 import { saveUpdateDraft, readUpdateDraft, clearUpdateDraft } from '../src/main/update-recovery';
-import { acknowledgeWindowsUpdate, prepareWindowsUpdate, validateWindowsUpdatePaths } from '../src/main/windows-update';
+import { acknowledgeWindowsUpdate, launchWindowsUpdate, prepareWindowsUpdate, validateWindowsUpdatePaths } from '../src/main/windows-update';
 import type { AppUpdateDraft } from '../src/shared/types';
 
 const directories: string[] = [];
+vi.mock('node:child_process', async importOriginal => ({ ...await importOriginal<typeof import('node:child_process')>(), spawn: vi.fn() }));
 const temp = async (): Promise<string> => { const directory = await mkdtemp(path.join(os.tmpdir(), 'llm-update-test-')); directories.push(directory); return directory; };
 afterEach(async () => { vi.unstubAllGlobals(); await Promise.all(directories.splice(0).map(directory => rm(directory, { recursive: true, force: true }))); });
 const draft: AppUpdateDraft = { version: 1, text: '한국어 조합 😀\n작성 중', files: [{name:'첨부.txt',data:Buffer.from('attachment').toString('base64')}], target: 'both', models: {}, discussion: true, discussionRounds: -1, composerOpen: false, projectPath: 'C:\\project' };
 const asset = { name:'LLM Collaboration 0.5.19.exe', browser_download_url:'https://github.com/raonolje/LLMCollaboration/releases/download/v0.5.19/LLM.Collaboration.0.5.19.exe', digest:'sha256:'+'a'.repeat(64), size: 2 };
 
 describe('safe automatic update', () => {
+  it('keeps the app open until the helper validates its manifest and rejects a helper that exits early', async () => {
+    const directory = await temp(), manifest = path.join(directory, 'manifest.json');
+    const worker = Object.assign(new EventEmitter(), { exitCode: null as number | null, unref: vi.fn() });
+    vi.mocked(spawn).mockImplementation(() => { queueMicrotask(() => worker.emit('spawn')); return worker as unknown as ReturnType<typeof spawn>; });
+    const launching = launchWindowsUpdate(manifest); await new Promise(resolve => setTimeout(resolve, 50));
+    expect(worker.unref).not.toHaveBeenCalled();
+    await writeFile(path.join(directory, 'status.json'), '\ufeff'+JSON.stringify({ state: 'waiting-exit' }));
+    await launching; expect(worker.unref).toHaveBeenCalledOnce();
+    await rm(path.join(directory, 'status.json')); worker.exitCode = 1;
+    await expect(launchWindowsUpdate(manifest)).rejects.toThrow();
+  });
+
   it('acknowledges only the expected private update and confirmed UI recovery', async () => {
     const directory = await temp(); const folder = path.join(directory, 'updates', 'expected-nonce');
     await mkdir(folder, { recursive: true }); const manifest = path.join(folder, 'manifest.json');

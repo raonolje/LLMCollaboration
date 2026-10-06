@@ -51,12 +51,26 @@ export const prepareWindowsUpdate = async (update: DownloadedUpdate, options: Wi
 };
 // Execute the application's own embedded commands, without changing script policy.
 export const windowsUpdateCommand = (manifest: string): string => `& { ${windowsUpdateScript} } -Manifest '${manifest.replaceAll("'", "''")}'`;
-export const launchWindowsUpdate = (manifest: string): Promise<void> => new Promise((resolve, reject) => {
+export const launchWindowsUpdate = async (manifest: string): Promise<void> => {
   const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command',
     windowsUpdateCommand(manifest)], { detached: true, windowsHide: true, stdio: 'ignore' });
-  child.once('error', reject);
-  child.once('spawn', () => { child.unref(); resolve(); });
-});
+  await new Promise<void>((resolve, reject) => { child.once('error', reject); child.once('spawn', resolve); });
+  // Do not quit or discard the draft until the helper has validated its manifest.
+  try {
+    const statusFile = path.join(path.dirname(manifest), 'status.json');
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      try {
+        const status = JSON.parse(await readFile(statusFile, 'utf8').then(text => text.replace(/^\ufeff/u, ''))) as { state: string };
+        if (status.state === 'waiting-exit') return;
+        throw new Error('업데이트 설치 준비에 실패했습니다. 앱을 계속 사용할 수 있습니다.');
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      if (child.exitCode !== null) break;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    throw new Error('업데이트 설치 도우미를 시작하지 못했습니다. 앱을 계속 사용할 수 있습니다.');
+  } finally { child.unref(); }
+};
 export const acknowledgeWindowsUpdate = async (directory: string, version: string, manifestPath: string | undefined, ui: AppUpdateReady): Promise<void> => {
   if (!manifestPath) return;
   if (ui?.sidebarViewport !== true || ui?.independentScroll !== true || ui?.draftRestored !== true) throw new Error('새 앱의 화면이나 초안 복구를 확인하지 못했습니다. 이전 버전으로 복구합니다.');
