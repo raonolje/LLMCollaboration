@@ -25,7 +25,8 @@ function Unlocked([string]$file) {
 }
 try {
   if ($folder -ne [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Manifest)) -or $update.nonce -notmatch '^[0-9a-f-]{36}$' -or $source -eq $target -or $target -notmatch '^[A-Za-z]:\\' -or $source -notmatch '^[A-Za-z]:\\') {throw 'Invalid update paths'}
-  $updatesRoot=[IO.Path]::GetFullPath((Join-Path $update.directory 'updates')) + [IO.Path]::DirectorySeparatorChar
+  $updatesRoot=[IO.Path]::GetFullPath($update.updatesDirectory) + [IO.Path]::DirectorySeparatorChar
+  if ([IO.Path]::GetFileName($update.updatesDirectory) -ne 'updates') {throw 'Invalid private updates folder'}
   if (-not $source.StartsWith($updatesRoot,[StringComparison]::OrdinalIgnoreCase) -or -not $folder.StartsWith($updatesRoot,[StringComparison]::OrdinalIgnoreCase)) {throw 'Source must stay inside the private updates folder'}
   if ([IO.Path]::GetFileName($target) -notmatch '^LLM[ .]Collaboration(?:[ .]\d+\.\d+\.\d+)?\.exe$') {throw 'Invalid executable target'}
   $trustedOriginal = (Hash $target) -eq $update.targetHash

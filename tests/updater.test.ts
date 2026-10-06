@@ -84,6 +84,9 @@ describe('safe automatic update', () => {
     for(const target of ['\\\\server\\app.exe','C:\\','C:\\Windows\\notepad.exe'])expect(()=>validateWindowsUpdatePaths(update,{...options,target})).toThrow();
     expect(()=>validateWindowsUpdatePaths({...update,filePath:'C:\\profile\\other.exe'},options)).toThrow();
     expect(()=>validateWindowsUpdatePaths({...update,version:'0.5.18'},options)).toThrow();
+    const redirected = 'C:\\package-cache\\Roaming\\profile\\updates';
+    expect(()=>validateWindowsUpdatePaths({...update,filePath:redirected+'\\LLM Collaboration 0.5.19.exe'},options,redirected)).not.toThrow();
+    expect(()=>validateWindowsUpdatePaths(update,options,redirected)).toThrow();
   });
 
   it.skipIf(process.platform!=='win32')('prepares a private worker without changing the old executable and rechecks the source hash', async () => {

@@ -12,11 +12,11 @@ export type WindowsUpdateOptions = {
   target: string; directory: string; portable: boolean; currentVersion: string;
   runtimePid: number; launcherPid: number; projectPaths: string[];
 };
-export const validateWindowsUpdatePaths = (update: DownloadedUpdate, options: WindowsUpdateOptions): void => {
+export const validateWindowsUpdatePaths = (update: DownloadedUpdate, options: WindowsUpdateOptions, updatesDirectory = path.win32.join(options.directory, 'updates')): void => {
   const local = (value: string): boolean => /^[A-Za-z]:\\/u.test(value) && path.win32.isAbsolute(value);
   const expectedName = /^LLM[ .]Collaboration(?:[ .]\d+\.\d+\.\d+)?\.exe$/iu;
-  const relative = path.win32.relative(path.win32.join(options.directory, 'updates'), update.filePath);
-  if (!local(options.target) || !local(update.filePath) || !expectedName.test(path.win32.basename(options.target))
+  const relative = path.win32.relative(updatesDirectory, update.filePath);
+  if (!local(options.target) || !local(update.filePath) || !local(updatesDirectory) || path.win32.basename(updatesDirectory).toLowerCase() !== 'updates' || !expectedName.test(path.win32.basename(options.target))
     || !relative || relative.startsWith('..') || path.win32.isAbsolute(relative) || !/\.exe$/iu.test(update.filePath)
     || !/^[0-9a-f]{64}$/u.test(update.sha256) || !newerVersion(update.version, options.currentVersion)
     || path.win32.resolve(options.target).toLowerCase() === path.win32.resolve(update.filePath).toLowerCase()) {
@@ -35,13 +35,16 @@ export const prepareWindowsUpdate = async (update: DownloadedUpdate, options: Wi
   const realSource = await realpath(update.filePath);
   const realTarget = await realpath(options.target);
   const realDirectory = await realpath(options.directory);
-  validateWindowsUpdatePaths({ ...update, filePath: realSource }, { ...options, target: realTarget, directory: realDirectory });
-  const folder = path.join(realDirectory, 'updates', randomUUID());
+  // Windows package virtualization can redirect only newly created AppData files.
+  // Resolve the private updates folder itself; keep the data directory for backups.
+  const updatesDirectory = await realpath(path.join(options.directory, 'updates'));
+  validateWindowsUpdatePaths({ ...update, filePath: realSource }, { ...options, target: realTarget, directory: realDirectory }, updatesDirectory);
+  const folder = path.join(updatesDirectory, randomUUID());
   await mkdir(folder, { recursive: true });
   const manifest = path.join(folder, 'manifest.json');
   const worker = path.join(folder, 'worker.ps1');
   await writeFile(worker, '\ufeff' + windowsUpdateScript, 'utf8');
-  await writeJson(manifest, { ...options, directory: realDirectory, target: realTarget, filePath: realSource,
+  await writeJson(manifest, { ...options, directory: realDirectory, updatesDirectory, target: realTarget, filePath: realSource,
     version: update.version, sha256: update.sha256, folder, nonce: path.basename(folder),
     targetHash: createHash('sha256').update(await readFile(options.target)).digest('hex') });
   return manifest;
@@ -57,9 +60,9 @@ export const launchWindowsUpdate = (manifest: string): Promise<void> => new Prom
 export const acknowledgeWindowsUpdate = async (directory: string, version: string, manifestPath: string | undefined, ui: AppUpdateReady): Promise<void> => {
   if (!manifestPath) return;
   if (ui?.sidebarViewport !== true || ui?.independentScroll !== true || ui?.draftRestored !== true) throw new Error('새 앱의 화면이나 초안 복구를 확인하지 못했습니다. 이전 버전으로 복구합니다.');
-  directory = await realpath(directory);
+  const updatesDirectory = await realpath(path.join(directory, 'updates'));
   manifestPath = await realpath(manifestPath);
-  const relative = path.relative(path.join(directory, 'updates'), manifestPath);
+  const relative = path.relative(updatesDirectory, manifestPath);
   if (relative.startsWith('..') || path.isAbsolute(relative) || path.basename(manifestPath) !== 'manifest.json') throw new Error('업데이트 복구 경로가 올바르지 않습니다.');
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as { version: string; nonce: string };
   if (manifest.version !== version || path.basename(path.dirname(manifestPath)) !== manifest.nonce) throw new Error('재시작 버전이 업데이트와 일치하지 않습니다.');
