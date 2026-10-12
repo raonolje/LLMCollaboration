@@ -361,8 +361,12 @@ p { margin: 0; }
 .activity-progress-note { margin-top: 6px; color: #69768b; font-size: 11px; }
 
 .chat-column > .model-activity { position: static; margin: 12px 16px; }
-.chat-work-mode { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
+.chat-work-mode { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin: 8px 0; }
+.chat-work-mode-field { flex: 0 1 360px; max-width: 100%; }
 .chat-work-mode > span { overflow-wrap: anywhere; min-width: 0; }
 .chat-work-mode > p { flex-basis: 100%; margin: 0; }
+@media (max-width: 760px) {
+  .chat-work-mode-field { flex-basis: 100%; }
+}
 .tool-approval { max-height: 40vh; overflow: auto; }
 .tool-approval pre { white-space: pre-wrap; overflow-wrap: anywhere; }

@@ -58,6 +58,39 @@ const recordMockTranscript = async (request: CliRequest, text: string): Promise<
 };
 
 describe('service orchestration with an injected model', () => {
+  it.each([false, true])('queues a new instruction behind the whole discussion, including conclusion (cancel=%s)', (cancel) => withTemporaryWorkspace(async (workspace) => {
+    const projectPath = path.join(workspace, 'queued-chat');
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let reachedConclusion = false;
+    let activeConclusion = false;
+    const calls: CliRequest[] = [];
+    const service = createService({ registryPath: path.join(workspace, 'registry.json'), emit: () => undefined, autoStartSessions: false,
+      runModel: async (request) => {
+        calls.push(request);
+        if (request.phase === 'project-discussion-conclusion') {
+          activeConclusion = true; reachedConclusion = true;
+          request.signal.addEventListener('abort', release, { once: true });
+          await held; activeConclusion = false;
+          if (request.signal.aborted) throw new Error('토론이 중단되었습니다.');
+        }
+        if (request.prompt.includes('후속 파일 작성')) expect(activeConclusion).toBe(false);
+        return recordMockTranscript(request, '## 합의된 사항\n- 원본 보존\n## 남은 이견\n- 없음');
+      } });
+    await service.createProject({ path: projectPath, name: 'Queue fixture', goal: 'Preserve active discussion' });
+    const first = service.sendProjectMessage(projectPath, '첫 토론', 'both', {}, [], true, 1).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(reachedConclusion).toBe(true));
+    const queued = service.sendProjectMessage(projectPath, '후속 파일 작성', 'codex', {}, [], false, undefined, undefined, { direct: true });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(calls.some((request) => request.prompt.includes('현재 사용자 메시지 (codex에게 전달):\n후속 파일 작성'))).toBe(false);
+    if (cancel) await service.cancelProjectMessage(projectPath); else release();
+    await first;
+    const result = await queued;
+    expect(result.events.some((item) => item.actor === 'user' && item.message === '첫 토론')).toBe(true);
+    expect(result.events.filter((item) => item.actor === 'user' && item.message === '후속 파일 작성')).toHaveLength(1);
+    expect(calls.at(-1)?.phase).toBe('project-direct-work');
+    expect(calls.at(-1)?.readOnly).toBe(false);
+  }), 30_000);
   it('executes assigned file work before peer review instead of starting another read-only debate', () => withTemporaryWorkspace(async (workspace) => {
     const projectPath = path.join(workspace, 'direct'); const calls: CliRequest[] = [];
     const service = createService({ registryPath: path.join(workspace, 'registry.json'), emit: () => undefined, autoStartSessions: false,

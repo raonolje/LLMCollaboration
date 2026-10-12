@@ -734,6 +734,7 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
       discoverModelCatalog(provider, await cliPathFor(provider)))),
     sendProjectMessage: async (projectPath: string, message: string, target: Provider | 'both', models: Partial<Record<Provider, ChatModelSettings>> = {}, files: ChatFileInput[] = [], discussion = false, discussionRounds?: number, outputDirectory?: string, options: ChatExecutionOptions = {}): Promise<ProjectSnapshot> => {
       const resolved = path.resolve(projectPath);
+      return withLock(`project-chat-dispatch:${resolved}`, async () => {
       if (!options || typeof options !== 'object' || (options.direct !== undefined && typeof options.direct !== 'boolean')
         || (options.executor !== undefined && !providers.includes(options.executor))) throw new Error('작업 방식 또는 담당 모델이 올바르지 않습니다.');
       const direct = options.direct === true;
@@ -860,19 +861,22 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
         const finishedReplies = await readEvents(resolved);
         if (userMessage.metadata?.discussion && providers.every((provider) =>
           finishedReplies.some((item) => item.metadata?.replyTo === userMessage.id && item.actor === provider && item.type === 'chat'))) {
-          return discussProjectMessage(resolved, userMessage.id, controller.signal);
+          return await discussProjectMessage(resolved, userMessage.id, controller.signal);
         }
         return snapshot(resolved);
       } finally { finish(resolved, 'project-chat'); }
+      });
     },
     cancelProjectMessage: async (projectPath: string): Promise<void> => {
       active.get(key(projectPath, 'project-chat'))?.abort();
     },
     continueProjectDiscussion: async (projectPath: string, messageId: string): Promise<ProjectSnapshot> => {
       const resolved = path.resolve(projectPath);
+      return withLock(`project-chat-dispatch:${resolved}`, async () => {
       const controller = begin(resolved, 'project-chat');
       try { return await discussProjectMessage(resolved, messageId, controller.signal); }
       finally { finish(resolved, 'project-chat'); }
+      });
     },
     bootstrap: async (): Promise<Bootstrap> => {
       const projectPaths = await withLock('registry', async () => {

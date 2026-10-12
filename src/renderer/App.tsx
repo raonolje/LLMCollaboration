@@ -335,6 +335,7 @@ export default function App() {
     return () => { active = false; window.clearInterval(timer); window.removeEventListener('focus', focus); };
   }, []);
   const [chatSendingPaths, setChatSendingPaths] = useState<ReadonlySet<string>>(() => new Set());
+  const [chatQueuedPaths, setChatQueuedPaths] = useState<ReadonlySet<string>>(() => new Set());
   const [fileOutputFolders, setFileOutputFolders] = useState<Readonly<Record<string, string>>>({});
   const [directChat, setDirectChat] = useState(true);
 
@@ -344,6 +345,7 @@ export default function App() {
   const liveProjectChat = !!project && modelActivities.some((activity) => activity.projectPath.toLowerCase() === project.path.toLowerCase()
     && !activity.taskId && activity.phase !== 'project-kickoff' && activityIsLive(activity));
   const chatSending = !!project && (chatSendingPaths.has(project.path) || liveProjectChat);
+  const chatQueued = !!project && chatQueuedPaths.has(project.path);
   const chatEvents = useMemo(() => events.filter((event) => event.actor === 'codex' || event.actor === 'claude'
     || (event.type === 'chat' && event.actor === 'user')
     || (event.type === 'status' && event.actor === 'user' && event.metadata?.taskRequest === true)
@@ -986,19 +988,27 @@ export default function App() {
 
   const sendChat = (submitEvent: FormEvent<HTMLFormElement>): void => {
     submitEvent.preventDefault();
-    if (!project || (!chatDraftValue.current.trim() && !chatFiles.length) || chatSending) return;
+    if (!project || (!chatDraftValue.current.trim() && !chatFiles.length) || chatQueued) return;
     const projectPath = project.path;
     const message = chatDraftValue.current.trim();
     const target = chatTarget;
     const models = { ...chatModels };
     const files = [...chatFiles];
+    if (chatSending) {
+      setChatQueuedPaths((previous) => new Set([...previous, projectPath]));
+      notify('새 지시를 대기열에 보냈습니다. 현재 토론·응답이 끝난 뒤 실행합니다. 앱을 종료하면 대기 요청은 보존되지 않습니다.');
+    }
     setChatSendingPaths((previous) => new Set([...previous, projectPath]));
     setChatDraft('');
+    setChatFiles([]);
     void window.collab.sendProjectMessage(projectPath, message, target, models, files, !directChat && chatDiscussion,
       !directChat && chatDiscussion && target === 'both' ? chatDiscussionRounds : undefined, directChat ? fileOutputFolders[projectPath] : undefined, { direct: directChat })
-      .then((next) => { setSnapshot((current) => current?.project.path === projectPath ? next : current); setChatFiles([]); setTaskDiscussionId(null); })
-      .catch((error) => { setChatDraft((current) => current || message); notify(errorText(error), true); })
-      .finally(() => setChatSendingPaths((previous) => new Set([...previous].filter((item) => item !== projectPath))));
+      .then((next) => { setSnapshot((current) => current?.project.path === projectPath ? next : current); setTaskDiscussionId(null); })
+      .catch((error) => { setChatDraft((current) => current || message); setChatFiles((current) => current.length ? current : files); notify(errorText(error), true); })
+      .finally(() => {
+        setChatSendingPaths((previous) => new Set([...previous].filter((item) => item !== projectPath)));
+        if (chatSending) setChatQueuedPaths((previous) => new Set([...previous].filter((item) => item !== projectPath)));
+      });
   };
 
   const requestChatTask = (): void => {
@@ -1077,7 +1087,7 @@ export default function App() {
 
   const addBrowserFiles = (files: readonly File[]): void => {
     if (!files.length) return;
-    if (chatSending) { notify('현재 답변이 끝난 뒤 파일을 첨부해 주세요.', true); return; }
+    if (chatQueued) { notify('대기 중인 지시가 처리된 뒤 다음 파일을 첨부해 주세요.', true); return; }
     void Promise.all(files.map(encodeBrowserFile)).then((encoded) => setChatFiles((current) => {
       if (current.length + encoded.length > 5) { notify('첨부 파일은 최대 5개입니다.', true); return current; }
       return [...current, ...encoded];
@@ -1115,7 +1125,6 @@ export default function App() {
       <button type="button" className="chat-dock-toggle" aria-expanded={composerOpen} onClick={() => setComposerOpen((open) => !open)}>
         {composerOpen ? '대화 입력 접기 ▾' : `대화 입력 열기 ▴${chatHasDraft ? ' · 작성 중' : ''}`}
       </button>
-      {liveProjectChat && <button className="button danger small" type="button" onClick={() => project && void window.collab.cancelProjectMessage(project.path).catch((error: unknown) => notify(errorText(error), true))}>이 프로젝트 토론·응답 중단</button>}
       {toolApprovals.map((approval) => <section key={approval.id} className="panel panel-pad tool-approval" role="region" aria-label="도구 승인 대기">
         <strong>Claude · 도구 승인 대기: {approval.toolName}</strong><p>{projects.find((item) => item.path === approval.projectPath)?.name ?? approval.projectPath}</p>
         <details><summary>실행하려는 내용 확인</summary><pre>{approval.parameters}</pre></details>
@@ -1132,10 +1141,13 @@ export default function App() {
           {([{ value: 'both', label: '두 모델 모두' }, { value: 'codex', label: 'Codex만' }, { value: 'claude', label: 'Claude만' }] as const).map(({ value, label }) => <button type="button" key={value} className={'button ' + (chatTarget === value ? 'primary' : '')} aria-pressed={chatTarget === value} onClick={() => setChatTarget(value)}>{label}</button>)}
         </div>
         <div className="chat-work-mode">
-          <label>작업 방식 <select value={directChat ? 'direct' : 'review'} disabled={chatSending} onChange={(event) => { setDirectChat(event.target.value === 'direct'); if (event.target.value === 'direct') setChatDiscussion(false); }}>
+          <div className="field chat-work-mode-field">
+          <label htmlFor="chat-work-mode">작업 방식</label>
+          <select id="chat-work-mode" value={directChat ? 'direct' : 'review'} onChange={(event) => { setDirectChat(event.target.value === 'direct'); if (event.target.value === 'direct') setChatDiscussion(false); }}>
             <option value="direct">직접 작업 · 기존 CLI 설정과 도구 사용</option><option value="review">토론·검토 · 읽기 전용</option>
-          </select></label>
-          <button type="button" className="button small" disabled={chatSending || !directChat && chatTarget === 'both'} onClick={() => {
+          </select>
+          </div>
+          <button type="button" className="button small" disabled={!directChat && chatTarget === 'both'} onClick={() => {
             if (!project) return;
             const selectedPath = project.path;
             void window.collab.chooseDirectory().then((folder) => { if (folder) {
@@ -1171,11 +1183,11 @@ export default function App() {
         <label className="chat-discussion-toggle"><input type="checkbox" checked={chatDiscussion} disabled={chatTarget !== 'both'} onChange={(event) => { setChatDiscussion(event.target.checked); if (event.target.checked) setDirectChat(false); }} />두 모델이 서로 반론하며 토론하기</label>
         {chatTarget === 'both' && chatDiscussion && <div className="field discussion-rounds"><label htmlFor="chat-discussion-rounds">이번 지시의 토론 왕복 횟수</label><select id="chat-discussion-rounds" value={chatDiscussionRounds} onChange={(event) => setChatDiscussionRounds(Number(event.target.value))}>{[1, 2, 3, 4, 5, 6, 7, 8].map((round) => <option key={round} value={round}>{round}회 왕복</option>)}<option value={-1}>끝장 토론 · 합의까지 (최대 10회)</option></select>{chatDiscussionRounds === -1 && <span>두 모델 모두 이견 없음이라고 확인하면 멈춥니다. 10회에도 합의하지 못하면 미합의 쟁점을 남기고 종료합니다. 왕복마다 두 모델이 호출되며 추가 크레딧이 들 수 있습니다.</span>}</div>}
         </details>
-        <div className="chat-attachments"><button className="button small" type="button" disabled={chatSending || chatFiles.length >= 5} onClick={() => void window.collab.chooseChatFiles().then((chosen) => setChatFiles((current) => {
+        <div className="chat-attachments"><button className="button small" type="button" disabled={chatQueued || chatFiles.length >= 5} onClick={() => void window.collab.chooseChatFiles().then((chosen) => setChatFiles((current) => {
           if (current.length + chosen.length > 5) { notify('첨부 파일은 최대 5개입니다. 선택한 파일은 추가하지 않았습니다.', true); return current; }
           return [...current, ...chosen];
         })).catch((error: unknown) => notify(errorText(error), true))}>＋ 이미지·파일 첨부</button>{chatFiles.map((file, index) => <button className="button ghost small" type="button" key={`${pendingFileName(file)}-${index}`} title={pendingFileName(file)} onClick={() => setChatFiles((current) => current.filter((_, position) => position !== index))}>📎 {pendingFileName(file)} ×</button>)}</div>
-        <div className="chat-compose-actions"><span className="subtle">첨부 파일은 프로젝트 Git에 저장됩니다. 업무는 Codex만 또는 Claude만을 선택해 각각 요청하세요. 완료되면 상대 모델이 검수합니다. 파일당 25MB, 총 50MB · 5개까지.</span><div className="session-actions">{chatSending && <button className="button danger" type="button" onClick={() => project && void window.collab.cancelProjectMessage(project.path)}>응답 중단</button>}<button className="button" type="button" disabled={!chatHasDraft || chatSending || chatTarget === 'both'} onClick={requestChatTask}>선택한 모델에 업무 요청</button><button className="button primary" type="submit" disabled={(!chatHasDraft && !chatFiles.length) || chatSending}>{chatSending ? '진행 중…' : '메시지 보내기'}</button></div></div>
+        <div className="chat-compose-actions"><span className="subtle">첨부 파일은 프로젝트 Git에 저장됩니다. 업무는 Codex만 또는 Claude만을 선택해 각각 요청하세요. 완료되면 상대 모델이 검수합니다. 파일당 25MB, 총 50MB · 5개까지.</span><div className="session-actions">{chatSending && <button className="button danger" type="button" onClick={() => project && void window.collab.cancelProjectMessage(project.path)}>응답 중단</button>}<button className="button" type="button" disabled={!chatHasDraft || chatSending || chatTarget === 'both'} onClick={requestChatTask}>선택한 모델에 업무 요청</button><button className="button primary" type="submit" disabled={(!chatHasDraft && !chatFiles.length) || chatQueued}>{chatQueued ? '다음 지시 대기 중…' : chatSending ? '다음 지시 보내기' : '메시지 보내기'}</button></div></div>
       </form>
       )}
     </div>
