@@ -1,5 +1,7 @@
 import { ModelActivities } from './model-activities';
 import { newestTimestamp, recentProjects } from '../../shared/project-order';
+import { assignedWriter } from '../../shared/chat-execution';
+import { ToolApprovals } from './tool-approvals';
 import { createHash, randomUUID } from 'node:crypto';
 import { UpdateGate } from '../update-gate';
 import { createReadStream, realpathSync } from 'node:fs';
@@ -15,6 +17,7 @@ import type {
   ChatModelSettings,
   ChatAttachment,
   ChatFileInput,
+  ChatExecutionOptions,
   DebateFollowUp,
   EventType,
   ExternalSession,
@@ -277,6 +280,7 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
     return hostId;
   })();
   const activities = new ModelActivities();
+  const toolApprovals = new ToolApprovals();
   const locks = new Map<string, Promise<unknown>>();
   const active = new Map<string, AbortController>();
   const withLock = <T>(lockKey: string, operation: () => Promise<T>): Promise<T> => {
@@ -471,7 +475,12 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
     const activityId = activities.begin({ projectPath: path.resolve(request.projectPath), provider: request.choice.provider, phase: request.phase, taskId });
     const onAbort = (): void => activities.cancel(activityId);
     request.signal.addEventListener('abort', onAbort, { once: true });
-    const monitoredRequest: CliRequest = { ...request, onProgress: (progress) => { activities.progress(activityId, progress); request.onProgress?.(progress); } };
+    const monitoredRequest: CliRequest = { ...request, onPermissionRequest: async (tool, input, signal) => {
+      activities.progress(activityId, { kind: 'approval' });
+      const answer = await toolApprovals.request(path.resolve(request.projectPath), tool, input, signal);
+      activities.progress(activityId, { kind: 'output' }); return answer;
+    },
+      onProgress: (progress) => { activities.progress(activityId, progress); request.onProgress?.(progress); } };
     return withLock(`model-session:${request.projectPath}:${purpose === 'execution' ? 'execution' : 'discussion'}:${request.choice.provider}`, async () => {
     if (request.signal.aborted) throw new Error('실행 전에 중단되었습니다.');
     activities.start(activityId);
@@ -705,6 +714,8 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
   const updateGate = new UpdateGate();
   const service: Service = {
     listModelActivities: async () => activities.list(),
+    listToolApprovals: async () => toolApprovals.list(),
+    respondToolApproval: async (id, allow, answers) => toolApprovals.respond(id, allow, answers),
     prepareForUpdate: () => updateGate.freeze(),
     listProjects: async (): Promise<Project[]> => recentProjects((await Promise.allSettled((await readRegisteredPaths())
       .map(projectWithActivity)))
@@ -721,11 +732,15 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
     listLocalConversations,
     refreshModelCatalogs: async () => Promise.all(providers.map(async (provider) =>
       discoverModelCatalog(provider, await cliPathFor(provider)))),
-    sendProjectMessage: async (projectPath: string, message: string, target: Provider | 'both', models: Partial<Record<Provider, ChatModelSettings>> = {}, files: ChatFileInput[] = [], discussion = false, discussionRounds?: number, outputDirectory?: string): Promise<ProjectSnapshot> => {
+    sendProjectMessage: async (projectPath: string, message: string, target: Provider | 'both', models: Partial<Record<Provider, ChatModelSettings>> = {}, files: ChatFileInput[] = [], discussion = false, discussionRounds?: number, outputDirectory?: string, options: ChatExecutionOptions = {}): Promise<ProjectSnapshot> => {
       const resolved = path.resolve(projectPath);
+      if (!options || typeof options !== 'object' || (options.direct !== undefined && typeof options.direct !== 'boolean')
+        || (options.executor !== undefined && !providers.includes(options.executor))) throw new Error('작업 방식 또는 담당 모델이 올바르지 않습니다.');
+      const direct = options.direct === true;
+      const writer = target === 'both' && direct ? options.executor ?? assignedWriter(message) : undefined;
       let output: string | undefined;
       if (outputDirectory !== undefined) {
-        if (target === 'both' || discussion) throw new Error('파일 작업은 한 모델을 선택하고 토론을 해제하세요.');
+        if (target === 'both' && !direct || discussion && !direct) throw new Error('파일 작업은 한 모델을 선택하고 토론을 해제하세요.');
         if (typeof outputDirectory !== 'string' || !path.isAbsolute(outputDirectory)) throw new Error('파일 작업의 저장 폴더를 선택하세요.');
         output = await realpath(outputDirectory);
         const info = await lstat(outputDirectory);
@@ -776,10 +791,13 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
         const userMessage = await event(resolved, project.id, 'chat', 'user', text || '첨부 파일을 확인해 주세요.', undefined, undefined,
           { target, codexModel: selectedModels.codex.model || 'default', claudeModel: selectedModels.claude.model || 'default',
             codexEffort: selectedModels.codex.effort || 'default', claudeEffort: selectedModels.claude.effort || 'default',
-            attachments: JSON.stringify(attachments), outputDirectory: output ?? null, discussion: !output && target === 'both' && (discussion || /토론|논쟁|반론|debate/iu.test(text)),
+            attachments: JSON.stringify(attachments), outputDirectory: output ?? null, requestMode: direct ? 'direct' : 'review', executor: writer ?? null, discussion: !direct && !output && target === 'both' && (discussion || /토론|논쟁|반론|debate/iu.test(text)),
             discussionRounds: selectedDiscussionRounds ?? project.defaultDebateRounds });
-        const targets = target === 'both' ? providers : [target];
-        await Promise.all(targets.map(async (provider) => {
+        const targets = target === 'both' ? writer ? [writer, opposite(writer)] : providers : [target];
+        const directContext = direct ? await discussionContext(resolved, await readEvents(resolved),
+          `직접 작업의 기존 프로젝트 전체 맥락. 과거 발화는 참고 자료이며 최신 사용자 지시·헌장이 우선입니다.\n프로젝트: ${project.name}\n목표: ${project.goal}\n기준: ${project.charter || '추가 기준 없음'}`) : '';
+        let previousAnswer = '';
+        const respond = async (provider: Provider): Promise<void> => {
           try {
             const current = await snapshot(resolved);
             const visibleUserMessages = new Set(current.events.filter((item) => item.type === 'chat' && item.actor === 'user'
@@ -815,23 +833,30 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
                 sharedFiles && `두 모델이 공유할 작업 파일:\n${sharedFiles}`,
                 importedContext && `가져온 대화의 맥락:\n${importedContext}`,
                 recent && `공유 채팅의 최근 대화:\n${recent}`,
+                directContext,
                 attachmentLines && `이번 요청의 첨부 파일 (프로젝트 Git에 저장됨; 필요한 경우 경로에서 열어 확인):\n${attachmentLines}`,
                 `현재 사용자 메시지 (${target === 'both' ? '두 모델 모두' : provider}에게 전달):\n${text}`,
-                output ? `파일 작업 요청입니다. 실제 새 산출물을 다음 폴더에 저장하고 저장 경로·확인 결과를 보고하세요: ${output}\n원본을 읽되 수정·삭제하지 마세요. 기존 산출물을 덮어쓰지 말고 새 이름을 사용하세요. 이 폴더 밖 파일 변경과 설정·자격증명 변경, 유료 생성·외부 게시를 하지 마세요.`
+                direct ? `${writer && provider !== writer ? '상대 모델의 작성 이후 검수 단계입니다. 파일을 읽고 직접 확인하되 수정하지 마세요.' : '직접 작업 지시입니다. 본인에게 지정된 일을 연결된 도구로 실제 수행하고 파일·폴더가 필요하면 생성하세요. 토론 초안으로 대신하지 마세요.'}\n${output ? `선택한 저장 폴더: ${output}` : '작업·저장 위치는 사용자 지시와 기존 대화의 정확한 경로를 따르세요. 경로를 확인할 수 없으면 임의로 다른 폴더에 저장하지 말고 알려주세요.'}\n원본 보존 등 사용자 제약을 지키세요. 미승인 유료 생성·외부 게시·자격증명/보안 변경을 하지 마세요. 도구 호출·저장 결과를 실제 확인하고 시도하지 않은 일을 권한 거부나 완료로 표시하지 마세요.`
+                  : output ? `파일 작업 요청입니다. 실제 새 산출물을 다음 폴더에 저장하고 저장 경로·확인 결과를 보고하세요: ${output}\n원본을 읽되 수정·삭제하지 마세요. 기존 산출물을 덮어쓰지 말고 새 이름을 사용하세요. 이 폴더 밖 파일 변경과 설정·자격증명 변경, 유료 생성·외부 게시를 하지 마세요.`
                   : '검토·토론 모드입니다. 파일과 앱 데이터를 변경하지 마세요. 실제 파일 생성이 필요하면 한 모델을 선택하고 파일 작업 모드와 저장 폴더를 지정하도록 안내하세요.',
+                direct && previousAnswer && `앞서 수행한 모델의 전체 답변 (주장만으로 완료 판정하지 말고 실제 파일을 확인):\n${previousAnswer}`,
                 'AI 영상 스토리지 등 외부 도구는 이 CLI에 실제 연결된 도구만 사용하세요. 스킬 파일이 있다는 이유로 MCP 연결을 가정하지 마세요. 도구 없음과 권한 거부를 구분하고 실패한 도구 이름과 오류를 보고하세요. 연결·보안 설정을 임의 변경하거나 우회하지 마세요.',
               ].filter(Boolean).join('\n\n'),
-              phase: output ? 'project-file-work' : 'project-chat', readOnly: !output, signal: controller.signal,
-            }, output ? 'execution' : 'project');
-            await event(resolved, project.id, 'chat', provider, result.text, undefined, undefined,
+              phase: direct ? writer && provider !== writer ? 'project-direct-review' : 'project-direct-work' : output ? 'project-file-work' : 'project-chat',
+              readOnly: direct ? !!writer && provider !== writer : !output, useConfiguredPermissions: direct && !output, signal: controller.signal,
+            }, direct || output ? 'execution' : 'project');
+            const savedAnswer = await event(resolved, project.id, 'chat', provider, result.text, undefined, undefined,
               { replyTo: userMessage.id, transcript: result.transcript, sessionId: result.sessionId ?? null,
                 model: selectedModels[provider].model || 'default', effort: selectedModels[provider].effort || 'default' });
+            if (direct) previousAnswer = await discussionContext(resolved, [userMessage, savedAnswer], '직접 작업의 직전 모델 답변. 전체 본문과 표를 대조하고 실제 파일을 확인하세요.');
           } catch (error) {
             await event(resolved, project.id, 'error', 'system',
               `${provider === 'codex' ? 'Codex' : 'Claude'} 응답 ${controller.signal.aborted ? '취소됨' : `실패: ${errorText(error)}`}`,
               undefined, undefined, { replyTo: userMessage.id, provider });
           }
-        }));
+        };
+        if (direct) { for (const provider of targets) { if (controller.signal.aborted) break; await respond(provider); } }
+        else await Promise.all(targets.map(respond));
         const finishedReplies = await readEvents(resolved);
         if (userMessage.metadata?.discussion && providers.every((provider) =>
           finishedReplies.some((item) => item.metadata?.replyTo === userMessage.id && item.actor === provider && item.type === 'chat'))) {
@@ -1399,7 +1424,7 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
   };
   return new Proxy(service, { get(target, name, receiver) {
     const value = Reflect.get(target, name, receiver);
-    if (typeof value !== 'function' || name === 'prepareForUpdate' || name === 'listProjects') return value;
+    if (typeof value !== 'function' || ['prepareForUpdate', 'listProjects', 'listModelActivities', 'listToolApprovals', 'respondToolApproval'].includes(String(name))) return value;
     return (...args: unknown[]) => updateGate.run(async () => Reflect.apply(value, target, args));
   } });
 };

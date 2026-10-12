@@ -99,6 +99,8 @@ const registerHandlers = (): void => {
 
   ipcMain.handle('collab:bootstrap', () => service.bootstrap());
   ipcMain.handle('collab:listModelActivities', () => service.listModelActivities());
+  ipcMain.handle('collab:listToolApprovals', () => service.listToolApprovals());
+  ipcMain.handle('collab:respondToolApproval', (_event, id, allow, answers) => service.respondToolApproval(id, allow, answers));
   ipcMain.handle('collab:chooseDirectory', async () => {
     const options: Electron.OpenDialogOptions = {
       title: '프로젝트 폴더 선택',
@@ -185,7 +187,7 @@ const registerHandlers = (): void => {
     const result = mainWindow ? await dialog.showOpenDialog(mainWindow, options) : await dialog.showOpenDialog(options);
     return result.canceled ? [] : result.filePaths;
   });
-  ipcMain.handle('collab:sendProjectMessage', (_event, projectPath, message, target, models, files, discussion, discussionRounds, outputDirectory) => service.sendProjectMessage(projectPath, message, target, models, files, discussion, discussionRounds, outputDirectory));
+  ipcMain.handle('collab:sendProjectMessage', (_event, projectPath, message, target, models, files, discussion, discussionRounds, outputDirectory, options) => service.sendProjectMessage(projectPath, message, target, models, files, discussion, discussionRounds, outputDirectory, options));
   ipcMain.handle('collab:continueProjectDiscussion', (_event, projectPath, messageId) => service.continueProjectDiscussion(projectPath, messageId));
   ipcMain.handle('collab:cancelProjectMessage', (_event, projectPath) => service.cancelProjectMessage(projectPath));
   ipcMain.handle('collab:listLocalConversations', (_event, target?: LaunchRequest) => service.listLocalConversations(target));

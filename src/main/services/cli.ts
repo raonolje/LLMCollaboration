@@ -1,5 +1,7 @@
 import { progressFromLine, type CliProgress } from '../../shared/model-activity';
 import { cliProgressFromLine } from '../../shared/cli-progress';
+import { ClaudeControl } from './claude-control';
+import type { ToolPermissionResult } from './tool-approvals';
 import { spawn, execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
@@ -196,6 +198,8 @@ export type CliRequest = Readonly<{
   prompt: string;
   phase: string;
   readOnly: boolean;
+  useConfiguredPermissions?: boolean;
+  onPermissionRequest?: (toolName: string, input: unknown, signal: AbortSignal) => Promise<ToolPermissionResult>;
   effort?: string;
   signal: AbortSignal;
   sessionId?: string;
@@ -218,8 +222,8 @@ export const cliArguments = (request: CliRequest): string[] => {
     : [];
   const imageArgs = (request.imagePaths ?? []).flatMap((file) => ['--image', file]);
   return request.choice.provider === 'codex'
-    ? ['exec', '--json', '--cd', request.cwd, '--sandbox', request.readOnly ? 'read-only' : 'workspace-write', ...modelArgs, ...effortArgs, ...(request.sessionId ? ['resume', ...imageArgs, request.sessionId, '-'] : [...imageArgs, '-'])]
-    : ['-p', '--verbose', '--output-format', 'stream-json', '--permission-mode', request.readOnly ? 'plan' : 'acceptEdits', '--permission-prompts', 'none', '--tools', request.readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash', ...modelArgs, ...effortArgs, ...(request.sessionId ? ['--resume', request.sessionId] : []), 'Follow the full task instructions supplied on standard input.'];
+    ? ['exec', '--json', '--cd', request.cwd, ...(request.useConfiguredPermissions && !request.readOnly ? [] : ['--sandbox', request.readOnly ? 'read-only' : 'workspace-write']), ...modelArgs, ...effortArgs, ...(request.sessionId ? ['resume', ...imageArgs, request.sessionId, '-'] : [...imageArgs, '-'])]
+    : ['-p', '--verbose', '--output-format', 'stream-json', '--permission-mode', request.readOnly ? 'plan' : request.useConfiguredPermissions ? 'manual' : 'acceptEdits', '--permission-prompts', request.onPermissionRequest ? 'host' : 'none', '--tools', 'default', ...modelArgs, ...effortArgs, ...(request.sessionId ? ['--resume', request.sessionId] : []), ...(request.onPermissionRequest ? ['--input-format', 'stream-json', '--permission-prompt-tool', 'stdio'] : ['Follow the full task instructions supplied on standard input.'])];
 };
 
 const isSessionId = (value: unknown): value is string =>
@@ -319,20 +323,25 @@ export const runCli = async (request: CliRequest): Promise<CliResult> => {
   const output = path.join(request.projectPath, relative);
   await mkdir(projectFiles(request.projectPath).runs, { recursive: true });
   const log = createWriteStream(output, { encoding: 'utf8', flags: 'wx' });
-  log.write(`${JSON.stringify({ type: 'invocation', timestamp: new Date().toISOString(), provider: request.choice.provider, model: request.choice.model, effort: request.effort, phase: request.phase, prompt: request.prompt, cwd: request.cwd, sessionId: request.sessionId })}\n`);
+  log.write(`${JSON.stringify({ type: 'invocation', timestamp: new Date().toISOString(), provider: request.choice.provider, model: request.choice.model, effort: request.effort, phase: request.phase, prompt: request.prompt, cwd: request.cwd, sessionId: request.sessionId, readOnly: request.readOnly, permissions: request.useConfiguredPermissions ? 'cli-configured' : request.readOnly ? 'read-only' : 'workspace-write', tools: 'default' })}\n`);
 
   const args = cliArguments(request);
 
   const spawnCli = isWindowsShim(executable) ? crossSpawn : spawn;
   const child = spawnCli(executable, args, {
     cwd: request.cwd,
-    env: subscriptionEnvironment(),
+    env: request.choice.provider === 'claude' && request.onPermissionRequest
+      ? { ...Object.fromEntries(Object.entries(subscriptionEnvironment()).filter(([key]) => key !== 'CLAUDECODE')), CLAUDE_CODE_SDK_READS_SESSION_STATE: '1' }
+      : subscriptionEnvironment(),
     windowsHide: true,
     signal: request.signal,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   request.onProgress?.({ kind: 'started', processId: child.pid });
-  child.stdin!.end(request.prompt);
+  const control = request.choice.provider === 'claude' && request.onPermissionRequest
+    ? new ClaudeControl(request.prompt, (line) => { if (!child.stdin!.destroyed) child.stdin!.write(line); }, () => child.stdin!.end(),
+      request.onPermissionRequest, request.signal, (message) => { streamError = message; }) : undefined;
+  if (control) control.start(); else child.stdin!.end(request.prompt);
 
   let latest = '';
   let stderr = '';
@@ -353,6 +362,7 @@ export const runCli = async (request: CliRequest): Promise<CliResult> => {
         latest = extractText(line) || latest;
         try {
           const record = JSON.parse(line) as { type?: string; thread_id?: unknown; session_id?: unknown; message?: unknown; error?: { message?: unknown } };
+          control?.accept(record);
           if (record.type === 'error' || record.type === 'turn.failed') {
             const message = record.error?.message ?? record.message;
             if (typeof message === 'string') streamError = message.slice(-2000);
@@ -374,6 +384,7 @@ export const runCli = async (request: CliRequest): Promise<CliResult> => {
     child.once('error', (error) => { processError = error; if (!child.pid) reject(error); });
     child.once('close', (code) => processError ? reject(processError) : resolve(code ?? 1));
   }).finally(async () => {
+    control?.close();
     flush('stdout', stdoutDecoder.end());
     flush('stderr', stderrDecoder.end());
     if (pendingOut) flush('stdout', '\n');

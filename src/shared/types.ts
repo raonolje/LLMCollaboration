@@ -1,5 +1,7 @@
 import type { ModelActivity } from './model-activity';
 export type Provider = 'codex' | 'claude';
+export type ChatExecutionOptions = Readonly<{ direct?: boolean; executor?: Provider }>;
+export type ToolApproval = Readonly<{ id: string; projectPath: string; provider: Provider; toolName: string; parameters: string; createdAt: string }>;
 
 export type ModelChoice = Readonly<{
   provider: Provider;
@@ -29,7 +31,7 @@ export type ModelCatalog = Readonly<{
 export type AppUpdateDraft = Readonly<{
   version: 1; projectPath?: string; text: string; files: ChatFileInput[];
   target: Provider | 'both'; models: Partial<Record<Provider, ChatModelSettings>>;
-  discussion: boolean; discussionRounds: number; composerOpen: boolean; outputDirectory?: string;
+  discussion: boolean; discussionRounds: number; composerOpen: boolean; outputDirectory?: string; direct?: boolean;
 }>;
 export type AppUpdateReady = Readonly<{ sidebarViewport: boolean; independentScroll: boolean; draftRestored: boolean }>;
 export type AppUpdateCheck = Readonly<{
@@ -201,6 +203,8 @@ export type ProjectSnapshot = Readonly<{
 export type CollaborationAPI = Readonly<{
   bootstrap: () => Promise<Bootstrap>;
   listModelActivities: () => Promise<ModelActivity[]>;
+  listToolApprovals: () => Promise<ToolApproval[]>;
+  respondToolApproval: (id: string, allow: boolean, answers?: Record<string, string>) => Promise<void>;
   chooseDirectory: () => Promise<string | null>;
   chooseCliExecutable: () => Promise<string | null>;
   setCliExecutable: (provider: Provider, filePath: string | null) => Promise<CliStatus[]>;
@@ -217,7 +221,7 @@ export type CollaborationAPI = Readonly<{
   createProject: (input: ProjectInput) => Promise<ProjectSnapshot>;
   reconnectProject: (projectPath: string) => Promise<ProjectSnapshot>;
   chooseChatFiles: () => Promise<string[]>;
-  sendProjectMessage: (projectPath: string, message: string, target: Provider | 'both', models: Partial<Record<Provider, ChatModelSettings>>, files?: ChatFileInput[], discussion?: boolean, discussionRounds?: number, outputDirectory?: string) => Promise<ProjectSnapshot>;
+  sendProjectMessage: (projectPath: string, message: string, target: Provider | 'both', models: Partial<Record<Provider, ChatModelSettings>>, files?: ChatFileInput[], discussion?: boolean, discussionRounds?: number, outputDirectory?: string, options?: ChatExecutionOptions) => Promise<ProjectSnapshot>;
   continueProjectDiscussion: (projectPath: string, messageId: string) => Promise<ProjectSnapshot>;
   cancelProjectMessage: (projectPath: string) => Promise<void>;
   listLocalConversations: (target?: LaunchRequest) => Promise<ConversationCandidate[]>;

@@ -116,10 +116,20 @@ export const createRemote = (service: Service, userData: string, options: { addr
         return;
       }
       if (!authorized(request, (await readSettings()).token)) { json(response, 401, { error: '연결 코드가 올바르지 않습니다.' }); return; }
-      if (options.maintenance?.() && !(request.method === 'GET' && ['/v1/health', '/v1/operations', '/v1/projects', '/v1/events', '/v1/model-activities'].includes(url.pathname))) {
+      const approvalTraffic = url.pathname === '/v1/tool-approvals' && request.method === 'GET'
+        || /^\/v1\/tool-approvals\/[a-f0-9-]{36}$/u.test(url.pathname) && request.method === 'POST';
+      if (options.maintenance?.() && !approvalTraffic && !(request.method === 'GET' && ['/v1/health', '/v1/operations', '/v1/projects', '/v1/events', '/v1/model-activities'].includes(url.pathname))) {
         json(response, 503, { error: '업데이트 준비 중입니다. 토론과 업무가 끝난 뒤 자동 재시작합니다.' }); return;
       }
       const segments = url.pathname.split('/').filter(Boolean);
+      if (url.pathname === '/v1/tool-approvals' && request.method === 'GET') { json(response, 200, { approvals: await service.listToolApprovals() }); return; }
+      if (segments[0] === 'v1' && segments[1] === 'tool-approvals' && segments.length === 3 && request.method === 'POST') {
+        const body = object(await readBody(request));
+        if (typeof body.allow !== 'boolean') throw new Error('승인 여부를 선택하세요.');
+        const answers = body.answers === undefined ? undefined : object(body.answers);
+        if (answers && Object.values(answers).some((value) => typeof value !== 'string')) throw new Error('질문 답변 형식이 올바르지 않습니다.');
+        await service.respondToolApproval(segments[2], body.allow, answers as Record<string, string> | undefined); json(response, 200, { ok: true }); return;
+      }
       if (request.method === 'GET' && url.pathname === '/v1/events') {
         response.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Content-Type-Options': 'nosniff' });
         response.write(': connected\n\n');
@@ -226,6 +236,11 @@ export const createRemote = (service: Service, userData: string, options: { addr
         const chatMessage = files.length && !String(body.message ?? '').trim() ? '' : text(body.message);
         const discussion = body.discussion === true;
         const discussionRounds = body.discussionRounds === undefined ? undefined : Number(body.discussionRounds);
+        if (body.direct !== undefined) {
+          if (typeof body.direct !== 'boolean') throw new Error('작업 방식을 선택하세요.');
+          json(response, 202, launch('chat', id, () => service.sendProjectMessage(directory, chatMessage, chatTarget, selected, files, discussion,
+            discussionRounds, undefined, { direct: body.direct as boolean }), { target: chatTarget })); return;
+        }
         json(response, 202, launch('chat', id, () => discussionRounds !== undefined
           ? service.sendProjectMessage(directory, chatMessage, chatTarget, selected, files, discussion, discussionRounds)
           : files.length || discussion ? service.sendProjectMessage(directory, chatMessage, chatTarget, selected, files, discussion)

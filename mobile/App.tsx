@@ -1,4 +1,6 @@
 import { projectsWithLiveActivity } from '../src/shared/project-order';
+import type { ToolApproval } from '../src/shared/types';
+import { toolQuestions } from '../src/shared/tool-questions';
 import { queryActivity } from '../src/shared/activity-query';
 import { activityIsLive, activityLabel, latestActivity, type ModelActivity } from '../src/shared/model-activity';
 import { ActivityProgressCard } from './ActivityProgressCard';
@@ -51,6 +53,16 @@ export default function App() {
   const [historyQuery, setHistoryQuery] = useState('');
   const [modelPicker, setModelPicker] = useState(false);
   const [composerOpen, setComposerOpen] = useState(true);
+  const [directChat, setDirectChat] = useState(true);
+  const [toolApprovals, setToolApprovals] = useState<ToolApproval[]>([]);
+  const [toolAnswers, setToolAnswers] = useState<Record<string, Record<string, string>>>({});
+  useEffect(() => {
+    if (!connection) { setToolApprovals([]); return; }
+    let active = true;
+    const poll = () => void request<{ approvals: ToolApproval[] }>(connection, '/tool-approvals').then(({ approvals }) => { if (active) setToolApprovals(approvals); }).catch(() => undefined);
+    poll(); const timer = setInterval(poll, 2000);
+    return () => { active = false; clearInterval(timer); };
+  }, [connection]);
   const [taskEditor, setTaskEditor] = useState<'plan' | 'manual' | null>(null);
   const [historyLimit, setHistoryLimit] = useState(30);
   const [expandedMessages, setExpandedMessages] = useState<string[]>([]);
@@ -158,8 +170,8 @@ export default function App() {
     const content = message;
     const files = chatFiles.map(({ name, data }) => ({ name, data }));
     void act(async () => {
-      await request(connection, `/projects/${projectId}/chat`, { message: content, target, models, files, discussion: target === 'both' && discussion,
-        discussionRounds: target === 'both' && discussion ? discussionRounds ?? snapshot?.project.defaultDebateRounds ?? 2 : undefined });
+      await request(connection, `/projects/${projectId}/chat`, { message: content, target, models, files, direct: directChat, discussion: !directChat && target === 'both' && discussion,
+        discussionRounds: !directChat && target === 'both' && discussion ? discussionRounds ?? snapshot?.project.defaultDebateRounds ?? 2 : undefined });
       setMessage(''); setChatFiles([]);
     }, '지시를 전달했습니다. 답변은 자동으로 갱신됩니다.');
   };
@@ -355,10 +367,15 @@ export default function App() {
       </ScrollView>)}
     </>}
     {snapshot && <View style={s.composer}>
+          {toolApprovals.map((approval) => <View key={approval.id}><Text style={s.label}>Claude · 도구 승인 대기: {approval.toolName}</Text>
+            <ScrollView style={{ maxHeight: 150 }}><Text selectable>{approval.parameters}</Text></ScrollView>
+            {toolQuestions(approval).map((question) => <View key={question}><Text>{question}</Text><TextInput style={s.input} value={toolAnswers[approval.id]?.[question] ?? ''} onChangeText={(answer) => setToolAnswers((previous) => ({ ...previous, [approval.id]: { ...previous[approval.id], [question]: answer } }))} /></View>)}
+            <View style={s.row}><Button label="거부" onPress={() => command(`/tool-approvals/${approval.id}`, { allow: false }, '이 호출을 거부했습니다.')} /><Button label={toolQuestions(approval).length ? '답변 보내기' : '이 호출 승인'} onPress={() => command(`/tool-approvals/${approval.id}`, { allow: true, answers: toolQuestions(approval).length ? toolAnswers[approval.id] : undefined }, '답변을 전달했습니다.')} /></View></View>)}
           {activityConnected && modelActivities.some((item) => item.projectPath.toLowerCase() === snapshot.project.path.toLowerCase() && !item.taskId && item.phase !== 'project-kickoff' && activityIsLive(item)) && <Button label="이 프로젝트 토론·응답 중단" onPress={() => command(`/projects/${projectId}/cancel-chat`, {}, '중단을 요청했습니다. 저장된 답변은 보존됩니다.')} />}
           {activityConnected && [...new Set(modelActivities.filter((item) => item.projectPath.toLowerCase() === snapshot.project.path.toLowerCase() && item.taskId && activityIsLive(item)).map((item) => item.taskId!))].map((taskId) => <Button key={taskId} label="진행 중 업무 중단" onPress={() => command(`/projects/${projectId}/tasks/${taskId}/cancel`, {}, '업무 중단을 요청했습니다.')} />)}
           <Pressable accessibilityRole="button" onPress={() => setComposerOpen((current) => !current)} style={s.composerToggle}><Text style={s.composerToggleText}>{composerOpen ? '대화 입력 접기 ▾' : '대화 입력 열기 ▴'}{!composerOpen && message.trim() ? ' · 작성 중' : ''}</Text></Pressable>
           {composerOpen && <>
+          <View style={s.row}><Button label="직접 작업" active={directChat} onPress={() => {setDirectChat(true);setDiscussion(false);}} /><Button label="토론·검토" active={!directChat} onPress={() => setDirectChat(false)} /></View>
           <View style={s.composerTop}><View style={s.targets}>{(['both', 'codex', 'claude'] as Target[]).map((item) => <Pressable key={item} onPress={() => setTarget(item)} style={[s.target, target === item && s.targetActive]}>
             <Text style={[s.targetText, target === item && s.targetTextActive]}>{item === 'both' ? '둘 다' : item === 'codex' ? 'Codex' : 'Claude'}</Text></Pressable>)}</View>
             <Pressable onPress={() => setModelPicker(true)}><Text style={s.settings}>모델·토론 ⚙</Text></Pressable></View>
@@ -386,7 +403,7 @@ export default function App() {
       <Button label={busy ? '프로젝트 생성 중…' : '프로젝트 만들기'} active disabled={busy || !projectName.trim() || !projectGoal.trim()} onPress={createProject} />
     </ScrollView></View></View></Modal>
     <Modal visible={projectDeleter} animationType="slide" transparent onRequestClose={() => setProjectDeleter(false)}><View style={s.modalBackdrop}><View style={s.modalSheet}><View style={s.modalHead}><Text style={s.title}>프로젝트 삭제</Text><Pressable onPress={() => setProjectDeleter(false)}><Text style={s.close}>닫기</Text></Pressable></View><Text style={s.hint}>{snapshot?.project.name} · {snapshot?.project.path}</Text><Text style={s.label}>확인하려면 프로젝트 이름을 그대로 입력하세요</Text><TextInput style={s.input} value={deleteConfirmation} onChangeText={setDeleteConfirmation} autoCapitalize="none" /><View style={s.row}><Button label="앱 목록에서만 제거" disabled={busy || deleteConfirmation !== snapshot?.project.name} onPress={() => deleteProject('unregister')} /><Button label="폴더도 휴지통으로 이동" disabled={busy || deleteConfirmation !== snapshot?.project.name} onPress={() => deleteProject('trash')} /></View><Text style={s.hint}>앱 목록에서만 제거하면 PC 폴더와 Git 기록은 그대로 남습니다.</Text></View></View></Modal>
-    <Modal visible={modelPicker} animationType="slide" transparent onRequestClose={() => setModelPicker(false)}><View style={s.modalBackdrop}><View style={s.modalSheet}><View style={s.modalHead}><Text style={s.title}>모델·토론 설정</Text><Pressable onPress={() => setModelPicker(false)}><Text style={s.close}>완료</Text></Pressable></View><ScrollView style={s.modalList} contentContainerStyle={s.modalContent}><Button label="↻ 모델 목록 새로고침" onPress={() => { if (connection) void request<{ catalogs: Catalog[] }>(connection, '/models').then(({ catalogs: found }) => setCatalogs(found)).catch((error: unknown) => setNotice(errorText(error))); }} />{(['codex', 'claude'] as Provider[]).filter((provider) => target === 'both' || target === provider).map(modelControl)}<Pressable style={s.discussion} disabled={target !== 'both'} onPress={() => setDiscussion((old) => !old)}><Text style={s.label}>두 모델 토론</Text><Text style={s.check}>{discussion && target === 'both' ? '켜짐' : '꺼짐'}</Text></Pressable>{target === 'both' && discussion && <><Text style={s.label}>이번 지시의 토론 왕복 횟수</Text><View style={s.row}>{[1, 2, 3, 4, 5, 6, 7, 8, -1].map((round) => <Button key={round} label={round === -1 ? '끝장 토론 · 최대 10회' : `${round}회`} active={(discussionRounds ?? snapshot?.project.defaultDebateRounds ?? 2) === round} onPress={() => setDiscussionRounds(round)} />)}</View></>}</ScrollView></View></View></Modal>
+    <Modal visible={modelPicker} animationType="slide" transparent onRequestClose={() => setModelPicker(false)}><View style={s.modalBackdrop}><View style={s.modalSheet}><View style={s.modalHead}><Text style={s.title}>모델·토론 설정</Text><Pressable onPress={() => setModelPicker(false)}><Text style={s.close}>완료</Text></Pressable></View><ScrollView style={s.modalList} contentContainerStyle={s.modalContent}><Button label="↻ 모델 목록 새로고침" onPress={() => { if (connection) void request<{ catalogs: Catalog[] }>(connection, '/models').then(({ catalogs: found }) => setCatalogs(found)).catch((error: unknown) => setNotice(errorText(error))); }} />{(['codex', 'claude'] as Provider[]).filter((provider) => target === 'both' || target === provider).map(modelControl)}<Pressable style={s.discussion} disabled={target !== 'both'} onPress={() => { setDiscussion((old) => !old); setDirectChat(false); }}><Text style={s.label}>두 모델 토론</Text><Text style={s.check}>{discussion && target === 'both' ? '켜짐' : '꺼짐'}</Text></Pressable>{target === 'both' && discussion && <><Text style={s.label}>이번 지시의 토론 왕복 횟수</Text><View style={s.row}>{[1, 2, 3, 4, 5, 6, 7, 8, -1].map((round) => <Button key={round} label={round === -1 ? '끝장 토론 · 최대 10회' : `${round}회`} active={(discussionRounds ?? snapshot?.project.defaultDebateRounds ?? 2) === round} onPress={() => setDiscussionRounds(round)} />)}</View></>}</ScrollView></View></View></Modal>
     <Modal visible={!!selectedEvent} animationType="slide" transparent onRequestClose={() => setSelectedEvent(null)}><View style={s.modalBackdrop}><View style={[s.modalSheet, s.recordSheet]}><View style={s.modalHead}><View><Text style={s.title}>{selectedEvent?.actor === 'user' ? '내 지시' : selectedEvent?.actor === 'codex' ? 'Codex 기록' : selectedEvent?.actor === 'claude' ? 'Claude 기록' : '프로젝트 기록'}</Text><Text style={s.meta}>{selectedEvent ? date(selectedEvent.timestamp) : ''}</Text></View><Pressable onPress={() => setSelectedEvent(null)}><Text style={s.close}>닫기</Text></Pressable></View><ScrollView style={s.modalList} contentContainerStyle={s.modalContent}><MarkdownText text={selectedEvent?.message ?? ''} /></ScrollView></View></View></Modal>
   </KeyboardAvoidingView>;
 }

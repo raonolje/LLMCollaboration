@@ -26,7 +26,7 @@ export type ModelActivity = Readonly<{
   updatedAt: string;
   lastOutputAt?: string;
   processId?: number;
-  signal?: 'output' | 'thinking' | 'tool' | 'compacting' | 'rate-limited';
+  signal?: 'output' | 'thinking' | 'tool' | 'compacting' | 'rate-limited' | 'approval';
   error?: string;
   progress?: ActivityProgress;
 }>;
@@ -55,9 +55,10 @@ export const activityLabel = (activity: ModelActivity): string => {
   if (activity.state === 'completed') return activity.phase === 'project-kickoff' ? '연결 확인 완료' : '이번 응답 완료';
   if (activity.signal === 'compacting') return '대화 맥락 정리 중';
   if (activity.signal === 'rate-limited') return '공급자 제한 · 대기 중';
+  if (activity.signal === 'approval') return '도구 승인 대기';
   if (/review/u.test(activity.phase)) return '교차 검수 중';
   if (/discussion|debate/u.test(activity.phase)) return '토론 중';
-  if (/execution|revision|file-work/u.test(activity.phase)) return '업무 실행 중';
+  if (/execution|revision|file-work|direct-work/u.test(activity.phase)) return '업무 실행 중';
   if (/planning/u.test(activity.phase)) return '업무 계획 중';
   return '검토 중 · 응답 생성 중';
 };

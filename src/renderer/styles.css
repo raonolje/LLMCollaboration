@@ -364,3 +364,5 @@ p { margin: 0; }
 .chat-work-mode { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
 .chat-work-mode > span { overflow-wrap: anywhere; min-width: 0; }
 .chat-work-mode > p { flex-basis: 100%; margin: 0; }
+.tool-approval { max-height: 40vh; overflow: auto; }
+.tool-approval pre { white-space: pre-wrap; overflow-wrap: anywhere; }

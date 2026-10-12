@@ -1,5 +1,6 @@
 import { queryActivity } from '../shared/activity-query';
 import { newestTimestamp, projectsWithLiveActivity } from '../shared/project-order';
+import { toolQuestions } from '../shared/tool-questions';
 import { activityIsLive, activityLabel, latestActivity, type ModelActivity } from '../shared/model-activity';
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type SetStateAction } from 'react';
 import QRCode from 'qrcode';
@@ -32,6 +33,7 @@ import type {
   Task,
   TaskInput,
   TaskStatus,
+  ToolApproval,
 } from '../shared/types';
 import { consensusLabel, parseDebateSummary } from '../shared/debate-summary';
 import appIcon from '../../assets/icon.svg?url';
@@ -308,6 +310,14 @@ export default function App() {
       .finally(() => setRemoteBusy(false));
   };
   const [modelActivities, setModelActivities] = useState<ModelActivity[]>([]);
+  const [toolApprovals, setToolApprovals] = useState<ToolApproval[]>([]);
+  const [toolAnswers, setToolAnswers] = useState<Record<string, Record<string, string>>>({});
+  useEffect(() => {
+    let active = true;
+    const poll = () => void window.collab.listToolApprovals().then((items) => { if (active) setToolApprovals(items); }).catch(() => undefined);
+    poll(); const timer = window.setInterval(poll, 2000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, []);
   const [activityConnected, setActivityConnected] = useState(false);
   useEffect(() => {
     let active = true;
@@ -326,6 +336,7 @@ export default function App() {
   }, []);
   const [chatSendingPaths, setChatSendingPaths] = useState<ReadonlySet<string>>(() => new Set());
   const [fileOutputFolders, setFileOutputFolders] = useState<Readonly<Record<string, string>>>({});
+  const [directChat, setDirectChat] = useState(true);
 
   const project = snapshot?.project ?? null;
   const tasks = snapshot?.tasks ?? [];
@@ -528,6 +539,7 @@ export default function App() {
       setChatDraft(saved.text); setChatFiles(saved.files); setChatTarget(saved.target);
       setChatModels((current) => ({ codex: saved.models.codex ?? current.codex, claude: saved.models.claude ?? current.claude }));
       setChatDiscussion(saved.discussion); setChatDiscussionRounds(saved.discussionRounds); setComposerOpen(saved.composerOpen);
+      setDirectChat(saved.direct ?? !saved.discussion);
       if (saved.projectPath && saved.outputDirectory) setFileOutputFolders((previous) => ({ ...previous, [saved.projectPath!]: saved.outputDirectory! }));
       notify('업데이트 전 작성하던 메시지와 첨부 파일을 복구했습니다.');
     }
@@ -649,7 +661,7 @@ export default function App() {
     setUpdateBusy(true);
     try { await window.collab.downloadAppUpdate({version: 1, projectPath: project?.path, text: chatDraftValue.current,
       files: chatFiles, target: chatTarget, models: chatModels, discussion: chatDiscussion,
-      discussionRounds: chatDiscussionRounds, composerOpen, outputDirectory: project ? fileOutputFolders[project.path] : undefined }); }
+      discussionRounds: chatDiscussionRounds, composerOpen, outputDirectory: project ? fileOutputFolders[project.path] : undefined, direct: directChat }); }
     catch (error) { notify(errorText(error), true); setUpdateBusy(false); setInstallingUpdate(false); }
   };
 
@@ -982,8 +994,8 @@ export default function App() {
     const files = [...chatFiles];
     setChatSendingPaths((previous) => new Set([...previous, projectPath]));
     setChatDraft('');
-    void window.collab.sendProjectMessage(projectPath, message, target, models, files, chatDiscussion,
-      chatDiscussion && target === 'both' ? chatDiscussionRounds : undefined, fileOutputFolders[projectPath])
+    void window.collab.sendProjectMessage(projectPath, message, target, models, files, !directChat && chatDiscussion,
+      !directChat && chatDiscussion && target === 'both' ? chatDiscussionRounds : undefined, directChat ? fileOutputFolders[projectPath] : undefined, { direct: directChat })
       .then((next) => { setSnapshot((current) => current?.project.path === projectPath ? next : current); setChatFiles([]); setTaskDiscussionId(null); })
       .catch((error) => { setChatDraft((current) => current || message); notify(errorText(error), true); })
       .finally(() => setChatSendingPaths((previous) => new Set([...previous].filter((item) => item !== projectPath))));
@@ -1104,6 +1116,14 @@ export default function App() {
         {composerOpen ? '대화 입력 접기 ▾' : `대화 입력 열기 ▴${chatHasDraft ? ' · 작성 중' : ''}`}
       </button>
       {liveProjectChat && <button className="button danger small" type="button" onClick={() => project && void window.collab.cancelProjectMessage(project.path).catch((error: unknown) => notify(errorText(error), true))}>이 프로젝트 토론·응답 중단</button>}
+      {toolApprovals.map((approval) => <section key={approval.id} className="panel panel-pad tool-approval" role="region" aria-label="도구 승인 대기">
+        <strong>Claude · 도구 승인 대기: {approval.toolName}</strong><p>{projects.find((item) => item.path === approval.projectPath)?.name ?? approval.projectPath}</p>
+        <details><summary>실행하려는 내용 확인</summary><pre>{approval.parameters}</pre></details>
+        {toolQuestions(approval).map((question) => <label key={question}>{question}<textarea value={toolAnswers[approval.id]?.[question] ?? ''} onChange={(event) => setToolAnswers((previous) => ({ ...previous, [approval.id]: { ...previous[approval.id], [question]: event.target.value } }))} /></label>)}
+        <p>이 호출 한 번에만 적용됩니다. 유료 생성·외부 게시·보안 변경은 기존 제한과 승인 범위를 확인하세요.</p>
+        <button type="button" className="button" onClick={() => void window.collab.respondToolApproval(approval.id, false).catch((error: unknown) => notify(errorText(error), true))}>거부</button>
+        <button type="button" className="button primary" onClick={() => void window.collab.respondToolApproval(approval.id, true, toolQuestions(approval).length ? toolAnswers[approval.id] : undefined).catch((error: unknown) => notify(errorText(error), true))}>{toolQuestions(approval).length ? '답변 보내기' : '이 호출 승인'}</button>
+      </section>)}
       {chatDragActive && <div className="chat-drop-hint" aria-hidden="true">이미지·파일을 놓아 첨부하기</div>}
       {composerOpen && (
       <form className="chat-compose" onSubmit={sendChat}>
@@ -1112,8 +1132,10 @@ export default function App() {
           {([{ value: 'both', label: '두 모델 모두' }, { value: 'codex', label: 'Codex만' }, { value: 'claude', label: 'Claude만' }] as const).map(({ value, label }) => <button type="button" key={value} className={'button ' + (chatTarget === value ? 'primary' : '')} aria-pressed={chatTarget === value} onClick={() => setChatTarget(value)}>{label}</button>)}
         </div>
         <div className="chat-work-mode">
-          <strong>{project && fileOutputFolders[project.path] ? '파일 작업 모드' : '검토·토론 모드 · 읽기 전용'}</strong>
-          <button type="button" className="button small" disabled={chatSending || chatTarget === 'both'} onClick={() => {
+          <label>작업 방식 <select value={directChat ? 'direct' : 'review'} disabled={chatSending} onChange={(event) => { setDirectChat(event.target.value === 'direct'); if (event.target.value === 'direct') setChatDiscussion(false); }}>
+            <option value="direct">직접 작업 · 기존 CLI 설정과 도구 사용</option><option value="review">토론·검토 · 읽기 전용</option>
+          </select></label>
+          <button type="button" className="button small" disabled={chatSending || !directChat && chatTarget === 'both'} onClick={() => {
             if (!project) return;
             const selectedPath = project.path;
             void window.collab.chooseDirectory().then((folder) => { if (folder) {
@@ -1123,7 +1145,7 @@ export default function App() {
           {project && fileOutputFolders[project.path] && <><span>{fileOutputFolders[project.path]}</span><button type="button" className="button small" disabled={chatSending} onClick={() => setFileOutputFolders((previous) => {
             const next = { ...previous }; delete next[project.path]; return next;
           })}>검토 모드로 돌아가기</button></>}
-          <p className="subtle">파일 생성은 한 모델을 선택하고 저장 폴더를 지정하세요. AI 영상 스토리지 작업에는 해당 CLI의 MCP 연결과 도구 권한이 별도로 필요합니다.</p>
+          <p className="subtle">직접 작업에서는 지시한 파일·폴더·앱 작업을 실제 수행합니다. “Codex 작성, Claude 검수”처럼 역할을 지정하면 순서대로 처리합니다. 저장 폴더는 필요할 때 선택하며, 도구의 기존 승인·인증 조건은 유지됩니다.</p>
         </div>
         {taskDiscussionId && <div className="chat-source-note">선택한 토론의 최종 결론을 업무에 연결합니다. <button className="button ghost small" type="button" onClick={() => setTaskDiscussionId(null)}>연결 해제</button></div>}
         <ChatDraftField ref={chatDraftField} draft={chatDraftValue} onHasDraft={setChatHasDraft} onPaste={pasteChatFiles} />
@@ -1146,7 +1168,7 @@ export default function App() {
             {catalog?.warning && <span className="chat-model-warning">{catalog.warning}</span>}
           </div>;
         })}</div>
-        <label className="chat-discussion-toggle"><input type="checkbox" checked={chatDiscussion} disabled={chatTarget !== 'both'} onChange={(event) => setChatDiscussion(event.target.checked)} />두 모델이 서로 반론하며 토론하기</label>
+        <label className="chat-discussion-toggle"><input type="checkbox" checked={chatDiscussion} disabled={chatTarget !== 'both'} onChange={(event) => { setChatDiscussion(event.target.checked); if (event.target.checked) setDirectChat(false); }} />두 모델이 서로 반론하며 토론하기</label>
         {chatTarget === 'both' && chatDiscussion && <div className="field discussion-rounds"><label htmlFor="chat-discussion-rounds">이번 지시의 토론 왕복 횟수</label><select id="chat-discussion-rounds" value={chatDiscussionRounds} onChange={(event) => setChatDiscussionRounds(Number(event.target.value))}>{[1, 2, 3, 4, 5, 6, 7, 8].map((round) => <option key={round} value={round}>{round}회 왕복</option>)}<option value={-1}>끝장 토론 · 합의까지 (최대 10회)</option></select>{chatDiscussionRounds === -1 && <span>두 모델 모두 이견 없음이라고 확인하면 멈춥니다. 10회에도 합의하지 못하면 미합의 쟁점을 남기고 종료합니다. 왕복마다 두 모델이 호출되며 추가 크레딧이 들 수 있습니다.</span>}</div>}
         </details>
         <div className="chat-attachments"><button className="button small" type="button" disabled={chatSending || chatFiles.length >= 5} onClick={() => void window.collab.chooseChatFiles().then((chosen) => setChatFiles((current) => {

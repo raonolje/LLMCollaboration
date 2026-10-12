@@ -7,6 +7,7 @@ const draftFile = (directory: string): string => path.join(directory, 'update-dr
 export const validateUpdateDraft = (value: unknown): AppUpdateDraft => {
   if (!value || typeof value !== 'object') throw new Error('업데이트 초안 형식이 올바르지 않습니다.');
   const draft = value as AppUpdateDraft;
+  if (draft.direct !== undefined && typeof draft.direct !== 'boolean') throw new Error('초안 작업 방식이 올바르지 않습니다.');
   if (draft.outputDirectory !== undefined && (typeof draft.outputDirectory !== 'string' || !path.isAbsolute(draft.outputDirectory))) throw new Error('초안 저장 폴더가 올바르지 않습니다.');
   if (draft.version !== 1 || typeof draft.text !== 'string' || draft.text.length > 20_000
     || !['both', 'codex', 'claude'].includes(draft.target) || !Array.isArray(draft.files) || draft.files.length > 5

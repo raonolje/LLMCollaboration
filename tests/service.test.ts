@@ -58,6 +58,20 @@ const recordMockTranscript = async (request: CliRequest, text: string): Promise<
 };
 
 describe('service orchestration with an injected model', () => {
+  it('executes assigned file work before peer review instead of starting another read-only debate', () => withTemporaryWorkspace(async (workspace) => {
+    const projectPath = path.join(workspace, 'direct'); const calls: CliRequest[] = [];
+    const service = createService({ registryPath: path.join(workspace, 'registry.json'), emit: () => undefined, autoStartSessions: false,
+      runModel: async (request) => { calls.push(request); if (request.choice.provider === 'codex') {
+        expect(request.readOnly).toBe(false); await mkdir(path.join(request.cwd, '검토')); await writeFile(path.join(request.cwd, '검토', '검토본.txt'), '실제 저장');
+      } else { expect(await readFile(path.join(request.cwd, '검토', '검토본.txt'), 'utf8')).toBe('실제 저장'); expect(request.readOnly).toBe(true); expect(request.prompt).toContain('전체 본문'); }
+      return recordMockTranscript(request, request.choice.provider === 'codex' ? '검토/검토본.txt에 저장했습니다. | 기준 | 결과 |\n|---|---|\n| 원본 | 보존 |' : '파일을 열어 검수했습니다.'); } });
+    await service.createProject({ path: projectPath, name: 'Direct', goal: 'Do work' });
+    const result = await service.sendProjectMessage(projectPath, '코덱스는 검토 폴더를 만들고 새 파일을 생성해. 클로드는 코덱스가 수정한 파일을 검수해', 'both', {}, [], true, 4, undefined, { direct: true });
+    expect(calls.map((item) => item.phase)).toEqual(['project-direct-work', 'project-direct-review']);
+    expect(calls[0].useConfiguredPermissions).toBe(true);
+    expect(result.events.some((item) => item.metadata?.discussionConclusion)).toBe(false);
+    expect(result.events.find((item) => item.actor === 'user' && item.type === 'chat')?.metadata?.requestMode).toBe('direct');
+  }), 30_000);
   it('restores latest conversation order from saved events after service restart without touching project files on listing', () => withTemporaryWorkspace(async (workspace) => {
     const options = { registryPath: path.join(workspace, 'registry.json'), emit: () => undefined, autoStartSessions: false,
       runModel: async (request: CliRequest) => recordMockTranscript(request, 'Latest answer') };

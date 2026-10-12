@@ -4,11 +4,31 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRemote } from '../src/main/remote';
 import type { Service } from '../src/main/services';
+import { ToolApprovals } from '../src/main/services/tool-approvals';
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
 
 describe('remote companion', () => {
+  it('authenticates exact-call approvals and preserves the approval path while an update waits for accepted work', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'collab-remote-')); directories.push(directory);
+    const approvals = new ToolApprovals(); const sendProjectMessage = vi.fn(async () => ({}));
+    let maintenance = false;
+    const service = { listToolApprovals: async () => approvals.list(), respondToolApproval: async (id: string, allow: boolean) => approvals.respond(id, allow),
+      listProjects: async () => [{ id: 'p', path: directory }], sendProjectMessage } as unknown as Service;
+    const remote = createRemote(service, directory, { address: '127.0.0.1', port: 0, maintenance: () => maintenance });
+    try {
+      const status = await remote.setEnabled(true); const headers = { Authorization: 'Bearer ' + status.token, 'Content-Type': 'application/json' };
+      const pending = approvals.request(directory, 'Write', { file_path: 'new.txt' }, new AbortController().signal);
+      expect((await fetch(status.url + '/v1/tool-approvals')).status).toBe(401);
+      const response = await fetch(status.url + '/v1/tool-approvals', { headers }).then((r) => r.json());
+      expect(response.approvals).toHaveLength(1); maintenance = true;
+      expect((await fetch(status.url + '/v1/tool-approvals/' + response.approvals[0].id, { method: 'POST', headers, body: JSON.stringify({ allow: true }) })).status).toBe(200);
+      expect(await pending).toEqual({ behavior: 'allow' }); maintenance = false;
+      expect((await fetch(status.url + '/v1/projects/p/chat', { method: 'POST', headers, body: JSON.stringify({ message: '파일을 생성해', target: 'codex', models: {}, direct: true }) })).status).toBe(202);
+      await vi.waitFor(() => expect(sendProjectMessage).toHaveBeenCalledWith(directory, '파일을 생성해', 'codex', {}, [], false, undefined, undefined, { direct: true }));
+    } finally { await remote.close(); }
+  });
   it('requires the pairing token and resolves only registered project IDs', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'collab-remote-'));
     directories.push(directory);

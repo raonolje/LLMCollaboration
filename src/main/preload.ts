@@ -6,6 +6,8 @@ const invoke = <T>(channel: string, ...args: unknown[]): Promise<T> => ipcRender
 const api: CollaborationAPI = {
   bootstrap: () => invoke('collab:bootstrap'),
   listModelActivities: () => invoke('collab:listModelActivities'),
+  listToolApprovals: () => invoke('collab:listToolApprovals'),
+  respondToolApproval: (id, allow, answers) => invoke('collab:respondToolApproval', id, allow, answers),
   chooseDirectory: () => invoke('collab:chooseDirectory'),
   chooseCliExecutable: () => invoke('collab:chooseCliExecutable'),
   setCliExecutable: (provider, filePath) => invoke('collab:setCliExecutable', provider, filePath),
@@ -22,7 +24,7 @@ const api: CollaborationAPI = {
   createProject: (input) => invoke('collab:createProject', input),
   reconnectProject: (projectPath) => invoke('collab:reconnectProject', projectPath),
   chooseChatFiles: () => invoke('collab:chooseChatFiles'),
-  sendProjectMessage: (projectPath, message, target, models, files, discussion, discussionRounds, outputDirectory) => invoke('collab:sendProjectMessage', projectPath, message, target, models, files, discussion, discussionRounds, outputDirectory),
+  sendProjectMessage: (projectPath, message, target, models, files, discussion, discussionRounds, outputDirectory, options) => invoke('collab:sendProjectMessage', projectPath, message, target, models, files, discussion, discussionRounds, outputDirectory, options),
   continueProjectDiscussion: (projectPath, messageId) => invoke('collab:continueProjectDiscussion', projectPath, messageId),
   cancelProjectMessage: (projectPath) => invoke('collab:cancelProjectMessage', projectPath),
   listLocalConversations: (target) => invoke('collab:listLocalConversations', target),
