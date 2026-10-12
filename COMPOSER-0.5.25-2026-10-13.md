@@ -7,3 +7,7 @@
 - Pending requests are in memory, not durable across application exit. The composer explicitly warns on enqueue.
 
 Verification: 35 service tests passed, including discussion-conclusion serialization and cancellation with a queued follow-up. Desktop/mobile type checks and desktop/mobile builds passed. Isolated selector layout passed at 390/430/1100px. No real model requests or production project mutations were used. The currently running app was not closed; packaged binary verification is distinct from live UI application.
+
+## Local application verification
+
+0.5.25 was applied to the existing portable launcher and started after confirming the prior app's models had finished and no model child processes remained. The 177-character unsent draft was saved privately and restored to the composer without sending. All 18 checked registry/settings/project/task/event hashes remained unchanged. The extracted running app.asar matches the verified 0.5.25 build; the new selector is visibly styled, and the send button is enabled with the restored draft. The public mobile bundle matches mobile/web-dist. No production debate was generated for verification.
