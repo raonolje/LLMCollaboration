@@ -1,4 +1,7 @@
+import { ModelActivities } from './model-activities';
+import { newestTimestamp, recentProjects } from '../../shared/project-order';
 import { createHash, randomUUID } from 'node:crypto';
+import { UpdateGate } from '../update-gate';
 import { createReadStream, realpathSync } from 'node:fs';
 import { copyFile, lstat, mkdir, readFile, readdir, realpath, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -47,8 +50,10 @@ import {
 } from './repository';
 import { conversationContext, importConversationFile, listLocalConversations, readImportedRaw, readImportedTurns } from './conversation-import';
 import { discoverModelCatalog } from './model-catalog';
+import { contextPreview, discussionContext, conclusionProvider } from './discussion-context';
+import { finalConsensus, explicitlyAgreed, isNoDisagreement, parseDebateSummary } from '../../shared/debate-summary';
 
-export type Service = Omit<CollaborationAPI, 'chooseDirectory' | 'chooseCliExecutable' | 'chooseConversationFile' | 'chooseChatFiles' | 'onEvent' | 'openDesktopSession' | 'consumeLaunchRequest' | 'onLaunchRequest' | 'installChatSkills' | 'checkAppUpdate' | 'downloadAppUpdate' | 'remoteStatus' | 'setRemoteEnabled' | 'rotateRemoteToken'> & { listProjects: () => Promise<Project[]> };
+export type Service = Omit<CollaborationAPI, 'chooseDirectory' | 'chooseCliExecutable' | 'chooseConversationFile' | 'chooseChatFiles' | 'onEvent' | 'openDesktopSession' | 'consumeLaunchRequest' | 'onLaunchRequest' | 'installChatSkills' | 'checkAppUpdate' | 'downloadAppUpdate' | 'readUpdateDraft' | 'clearUpdateDraft' | 'updateReady' | 'remoteStatus' | 'setRemoteEnabled' | 'rotateRemoteToken'> & { listProjects: () => Promise<Project[]>; prepareForUpdate: () => Promise<() => void> };
 
 export type ServiceOptions = Readonly<{
   registryPath: string;
@@ -111,8 +116,8 @@ const modelFor = (task: Task, provider: Provider): ModelChoice =>
 
 const roundCount = (value: number | undefined, fallback = 2, allowZero = false): number => {
   const resolved = value ?? fallback;
-  if (!Number.isInteger(resolved) || resolved < (allowZero ? 0 : 1) || resolved > 20) {
-    throw new Error(`토론 왕복 횟수는 ${allowZero ? '0' : '1'}~20 사이의 정수여야 합니다.`);
+  if (!Number.isInteger(resolved) || resolved < (allowZero ? 0 : 1) || resolved > 8) {
+    throw new Error(`토론 왕복 횟수는 ${allowZero ? '0' : '1'}~8 사이의 정수여야 합니다.`);
   }
   return resolved;
 };
@@ -144,6 +149,7 @@ const validateTaskInput = (input: TaskInput, project: Project, tasks: readonly T
     dependsOn: [...new Set(input.dependsOn)],
     debateRounds: roundCount(input.debateRounds, project.defaultDebateRounds),
     sourceConversationIds: input.sourceConversationIds ?? [],
+    sourceContext: input.sourceContext?.slice(0, 28_000),
   };
 };
 
@@ -270,6 +276,7 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
     if (!hostId) throw new Error('로컬 세션 식별자를 만들지 못했습니다.');
     return hostId;
   })();
+  const activities = new ModelActivities();
   const locks = new Map<string, Promise<unknown>>();
   const active = new Map<string, AbortController>();
   const withLock = <T>(lockKey: string, operation: () => Promise<T>): Promise<T> => {
@@ -301,7 +308,21 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
     const [project, tasks, events, localHostId] = await Promise.all([
       readProject(resolved), readTasks(resolved), readEvents(resolved), hostIdPromise,
     ]);
-    return { project: { ...project, path: resolved }, tasks, events, localHostId };
+    return { project: { ...project, path: resolved, lastActivityAt: events.reduce((latest, item) => newestTimestamp(latest, item.timestamp), newestTimestamp(project.lastActivityAt, project.createdAt)) }, tasks, events, localHostId };
+  };
+
+  const activityCache = new Map<string, { signature: string; timestamp?: string }>();
+  const projectWithActivity = async (projectPath: string): Promise<Project> => {
+    const project = await readProject(projectPath);
+    // A damaged/unreadable history must not hide an otherwise readable project.
+    const info = await stat(projectFiles(projectPath).events).catch(() => undefined);
+    const signature = info ? `${info.mtimeMs}:${info.size}` : 'missing';
+    let cached = activityCache.get(projectPath);
+    if (cached?.signature !== signature) {
+      cached = { signature, timestamp: (await readEvents(projectPath).catch(() => [])).reduce<string | undefined>((latest, item) => newestTimestamp(latest, item.timestamp), undefined) };
+      activityCache.set(projectPath, cached);
+    }
+    return { ...project, path: path.resolve(projectPath), lastActivityAt: newestTimestamp(project.lastActivityAt, project.createdAt, cached?.timestamp) };
   };
 
   const event = async (
@@ -348,7 +369,7 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
 
   const status = async (projectPath: string, projectId: string, taskId: string, value: TaskStatus, message: string): Promise<Task> => {
     const task = await replaceTask(projectPath, taskId, (previous) => ({ ...previous, status: value }));
-    await event(projectPath, projectId, 'status', 'system', message, taskId);
+    await event(projectPath, projectId, 'status', 'system', message, taskId, undefined, { taskStatus: value });
     return task;
   };
 
@@ -414,7 +435,8 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
     if (sources.some((source) => !source)) throw new Error('프로젝트에 저장된 대화만 업무에 연결할 수 있습니다.');
     const contexts = await Promise.all(sources.map(async (source) =>
       conversationContext(source!, await readImportedTurns(projectPath, source!.id))));
-    return { ...input, sourceConversationIds: ids, sourceContext: contexts.join('\n\n---\n\n').slice(0, 42_000) };
+    return { ...input, sourceConversationIds: ids,
+      sourceContext: [input.sourceContext, ...contexts].filter(Boolean).join('\n\n---\n\n').slice(0, 42_000) };
   };
 
   const attachConversation = async (projectPath: string, provider: Provider, filePath: string): Promise<ProjectSnapshot> => {
@@ -445,26 +467,36 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
     request: CliRequest,
     purpose: ExternalSession['purpose'],
     taskId?: string,
-  ): Promise<CliResult> => withLock(`model-session:${request.projectPath}:${purpose}:${taskId ?? 'project'}:${request.choice.provider}`, async () => {
+  ): Promise<CliResult> => {
+    const activityId = activities.begin({ projectPath: path.resolve(request.projectPath), provider: request.choice.provider, phase: request.phase, taskId });
+    const onAbort = (): void => activities.cancel(activityId);
+    request.signal.addEventListener('abort', onAbort, { once: true });
+    const monitoredRequest: CliRequest = { ...request, onProgress: (progress) => { activities.progress(activityId, progress); request.onProgress?.(progress); } };
+    return withLock(`model-session:${request.projectPath}:${purpose === 'execution' ? 'execution' : 'discussion'}:${request.choice.provider}`, async () => {
+    if (request.signal.aborted) throw new Error('실행 전에 중단되었습니다.');
+    activities.start(activityId);
     const current = await snapshot(request.projectPath);
     const hostId = current.localHostId;
-    const sessions = taskId
-      ? current.tasks.find((task) => task.id === taskId)?.sessions ?? []
-      : current.project.sessions ?? [];
+    // Each provider keeps one execution chat and one discussion chat per project.
+    // Older task sessions remain readable, but new task runs never create another one.
+    const lane: ExternalSession['purpose'] = purpose === 'execution' ? 'execution' : 'debate';
+    const sessions = current.project.sessions ?? [];
     const previous = sessions.filter((session) =>
-      session.hostId === hostId && session.provider === request.choice.provider && session.purpose === purpose && !session.handedOffAt,
+      session.hostId === hostId && session.provider === request.choice.provider
+      && (session.purpose === lane || lane === 'debate' && session.purpose === 'project') && !session.handedOffAt,
     ).at(-1);
     const configuredPath = await cliPathFor(request.choice.provider);
     let restarted = false;
-    const result = await runModel({ ...request, effort: request.effort ?? request.choice.effort, sessionId: previous?.sessionId, configuredPath })
+    const result = await runModel({ ...monitoredRequest, effort: request.effort ?? request.choice.effort, sessionId: previous?.sessionId, configuredPath })
       .catch(async (error: unknown) => {
         if (request.choice.provider !== 'codex' || !previous?.sessionId
           || !/thread-store conflict|already has an active writer/iu.test(errorText(error))) throw error;
         restarted = true;
+        activities.start(activityId);
         const importedContext = (await Promise.all((current.project.importedConversations ?? []).slice(0, 3)
           .map(async (conversation) => conversationContext(conversation, await readImportedTurns(request.projectPath, conversation.id)))))
           .join('\n\n---\n\n').slice(0, 42_000);
-        return runModel({ ...request, effort: request.effort ?? request.choice.effort, sessionId: undefined, configuredPath,
+        return runModel({ ...monitoredRequest, effort: request.effort ?? request.choice.effort, sessionId: undefined, configuredPath,
           prompt: [request.prompt, '기존 Codex 채팅이 다른 앱에서 사용 중이므로 새 채팅에서 이어갑니다.',
             importedContext && `가져온 기존 대화의 맥락:\n${importedContext}`].filter(Boolean).join('\n\n') });
       });
@@ -474,7 +506,7 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
         hostId,
         provider: request.choice.provider,
         sessionId: result.sessionId,
-        purpose,
+        purpose: lane,
         cwd: request.cwd,
         createdAt: sessions.find((item) => item.hostId === hostId && item.sessionId === result.sessionId)?.createdAt ?? timestamp,
         updatedAt: timestamp,
@@ -483,14 +515,17 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
         items.some((item) => item.hostId === hostId && item.sessionId === session.sessionId)
           ? items.map((item) => item.hostId === hostId && item.sessionId === session.sessionId ? session : item)
           : [...items, session];
-      if (taskId) await replaceTask(request.projectPath, taskId, (task) => ({ ...task, sessions: update(task.sessions) }));
-      else await replaceProject(request.projectPath, (project) => ({ ...project, sessions: update(project.sessions), updatedAt: timestamp }));
+      await replaceProject(request.projectPath, (project) => ({ ...project, sessions: update(project.sessions), updatedAt: timestamp }));
     }
     if (restarted) await event(request.projectPath, current.project.id, 'system', 'system',
       'Codex 원래 채팅이 다른 앱에서 사용 중이어서 새 CLI 채팅으로 이어갔습니다.', taskId, undefined,
       { previousSessionId: previous?.sessionId ?? null, sessionId: result.sessionId ?? null });
     return result;
-  });
+  }).then((result) => { activities.finish(activityId, request.signal.aborted ? 'cancelled' : 'completed'); return result; }, (error: unknown) => {
+    activities.finish(activityId, request.signal.aborted ? 'cancelled' : 'failed', errorText(error));
+    throw error;
+  }).finally(() => request.signal.removeEventListener('abort', onAbort));
+  };
 
   const startProjectSessions = (projectPath: string): Promise<void> =>
     withLock(`project-sessions:${projectPath}`, async () => {
@@ -500,7 +535,7 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
         .join('\n\n---\n\n').slice(0, 42_000);
       const hostId = await hostIdPromise;
       const missing = providers.filter((provider) => !latest.sessions?.some((session) =>
-        session.hostId === hostId && session.provider === provider && session.purpose === 'project',
+        session.hostId === hostId && session.provider === provider && ['project', 'debate'].includes(session.purpose),
       ));
       await Promise.all(missing.map(async (provider) => {
         try {
@@ -532,11 +567,14 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
     signal: AbortSignal,
     round?: number,
     question?: string,
+    frozenEvents?: CollaborationEvent[],
   ): Promise<CollaborationEvent> => {
     const { project, task, events } = await taskById(projectPath, taskId);
+    const contextEvents = frozenEvents ?? events;
+    const context = await discussionContext(projectPath, contextEvents.filter((item) => item.taskId === taskId), JSON.stringify({ name: project.name, goal: project.goal, charter: project.charter, task }, null, 2));
     const result = await trackedModel({
       projectPath, cwd: projectPath, choice: modelFor(task, provider),
-      prompt: debatePrompt(project, task, events, provider, stage, round, question),
+      prompt: debatePrompt(project, task, contextEvents, provider, stage, round, question, context),
       phase: `debate-${stage}${round ? `-${round}` : ''}`, readOnly: true, signal,
     }, 'debate', taskId);
     const type: EventType = stage === 'followUp' ? 'response' : stage;
@@ -546,15 +584,18 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
   const debateRounds = async (projectPath: string, taskId: string, signal: AbortSignal, start: number, count: number): Promise<void> => {
     await Array.from({ length: count }, (_, index) => start + index).reduce<Promise<void>>(
       (previous, round) => previous.then(async () => {
-        await Promise.all(providers.map((provider) => debateTurn(projectPath, taskId, provider, round === 1 ? 'critique' : 'response', signal, round)));
+        const { events } = await taskById(projectPath, taskId);
+        await Promise.all(providers.map((provider) => debateTurn(projectPath, taskId, provider, round === 1 ? 'critique' : 'response', signal, round, undefined, events)));
       }),
       Promise.resolve(),
     );
   };
 
   const concludeDebate = async (projectPath: string, taskId: string, signal: AbortSignal): Promise<void> => {
-    const evaluations = await Promise.all(providers.map((provider) => debateTurn(projectPath, taskId, provider, 'evaluation', signal)));
+    const beforeEvaluation = await taskById(projectPath, taskId);
+    const evaluations = await Promise.all(providers.map((provider) => debateTurn(projectPath, taskId, provider, 'evaluation', signal, undefined, undefined, beforeEvaluation.events)));
     const { project, task, events } = await taskById(projectPath, taskId);
+    const fullContext = await discussionContext(projectPath, events.filter((item) => item.taskId === taskId), JSON.stringify({ name: project.name, goal: project.goal, charter: project.charter, task }, null, 2));
     const result = await trackedModel({
       projectPath, cwd: projectPath, choice: task.reviewer,
       prompt: [
@@ -562,13 +603,13 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
         '합의된 결정, 남은 이견, 이견별 판단 근거, 실제 실행 단계, 완료 기준과 검증 방법을 구분하세요.',
         '결론의 첫 부분에 반드시 다음 제목을 순서대로 쓰고 각 항목을 짧은 글머리표로 작성하세요: ## 합의된 사항, ## 남은 이견, ## 다음 지시·검증. 이견이 없다면 남은 이견에 "없음"이라고 쓰세요.',
         '상대 의견이 해결되지 않았으면 합의로 꾸미지 말고 미해결이라고 명시하세요.',
-        `양측 평가:\n${evaluations.map((item) => `${item.actor}: ${item.message}`).join('\n\n')}`,
-        taskCard(project, task, events, task.reviewer.provider),
+        fullContext,
+        taskCard(project, task, events, task.reviewer.provider, false),
       ].join('\n\n'),
       phase: 'debate-synthesis', readOnly: true, signal,
     }, 'debate', taskId);
     await replaceTask(projectPath, taskId, (value) => ({ ...value, debateSummary: result.text, status: 'ready' }));
-    await event(projectPath, project.id, 'decision', task.reviewer.provider, result.text, taskId, undefined, { transcript: result.transcript, sessionId: result.sessionId ?? null });
+    await event(projectPath, project.id, 'decision', task.reviewer.provider, result.text, taskId, undefined, { transcript: result.transcript, sessionId: result.sessionId ?? null, taskStatus: 'ready', consensusReached: finalConsensus(evaluations.map((item) => item.message), result.text) });
   };
 
   const discussProjectMessage = async (projectPath: string, messageId: string, signal: AbortSignal): Promise<ProjectSnapshot> => {
@@ -586,49 +627,89 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
       item.metadata?.replyTo === messageId && item.type === 'chat' && providers.includes(item.actor as Provider)));
     const first = await replies();
     if (!providers.every((provider) => first.some((item) => item.actor === provider))) throw new Error('양쪽 모델의 첫 답변이 완료되어야 토론을 시작할 수 있습니다.');
-    const rounds = roundCount(initial.project.defaultDebateRounds);
-    await Array.from({ length: rounds }, (_, index) => index + 1).reduce<Promise<void>>((previous, round) => previous.then(async () => {
+    const untilAgreement = request.metadata?.discussionRounds === -1;
+    let completed = 0;
+    while (providers.every((provider) => first.some((item) => item.actor === provider && item.metadata?.discussionRound === completed + 1))) completed++;
+    if (untilAgreement && completed >= 10) throw new Error('끝장 토론은 최대 10회입니다. 남은 이견을 확인한 뒤 새 지시를 보내세요.');
+    const rounds = untilAgreement ? 10 - completed : roundCount(typeof request.metadata?.discussionRounds === 'number'
+      ? request.metadata.discussionRounds : initial.project.defaultDebateRounds);
+    let agreementReached = false;
+    let settled: string[] = [];
+    let unresolved: string[] = [];
+    if (untilAgreement && completed > 0) {
+      const prior = (await replies()).filter((item) => item.metadata?.discussionRound === completed).map((item) => parseDebateSummary(item.message));
+      settled = prior[0]?.agreements.filter((item) => prior[1]?.agreements.includes(item)) ?? [];
+      unresolved = [...new Set(prior.flatMap((item) => item.disagreements)
+        .filter((item) => !isNoDisagreement(item)))];
+    }
+    await Array.from({ length: rounds }, (_, index) => completed + index + 1).reduce<Promise<void>>((previous, round) => previous.then(async () => {
+      if (signal.aborted) throw new Error('토론이 중단되었습니다. 저장된 답변은 보존됩니다.');
+      if (agreementReached) return;
       const all = await replies();
-      const latest = providers.map((provider) => all.filter((item) => item.actor === provider).at(-1)!);
-      await Promise.all(providers.map(async (provider) => {
+      const context = await discussionContext(projectPath, [request, ...all], `프로젝트: ${initial.project.name}\n목표: ${initial.project.goal}\n기준: ${initial.project.charter || '추가 제약 없음'}\n첨부: ${String(request.metadata?.attachments ?? '없음')}`);
+      const outcomes = await Promise.allSettled(providers.map(async (provider) => {
+        const saved = all.find((item) => item.actor === provider && item.metadata?.discussionRound === round);
+        if (saved) return saved.message;
         const result = await trackedModel({
           projectPath, cwd: projectPath, choice: { provider, model: String(request.metadata?.[`${provider}Model`] ?? 'default') },
           imagePaths: provider === 'codex' ? images : [],
           effort: request.metadata?.[`${provider}Effort`] === 'default' ? undefined : String(request.metadata?.[`${provider}Effort`] ?? 'medium'), phase: `project-discussion-${round}`,
           readOnly: true, signal,
           prompt: [
-            `프로젝트: ${initial.project.name}\n목표: ${initial.project.goal}\n기준: ${initial.project.charter || '추가 제약 없음'}`,
+            `프로젝트: ${contextPreview(initial.project.name, 500)}\n목표: ${contextPreview(initial.project.goal, 4000)}\n기준: ${contextPreview(initial.project.charter || '추가 제약 없음', 4000)}`,
             `사용자 요청: ${request.message}`,
             `첨부 파일 (프로젝트 폴더 기준): ${String(request.metadata?.attachments ?? '없음')}`,
-            `이전 양쪽 답변:\n${latest.map((item) => `${item.actor}: ${item.message.slice(0, 20_000)}`).join('\n\n')}`,
+            untilAgreement && settled.length ? `직전 양측 공통 진술 (유지하되 새 근거에 따른 철회·충돌은 명시):\n${contextPreview(settled.map((item) => `- ${item}`).join('\n'), 6000)}` : '',
+            context,
+            untilAgreement && unresolved.length ? `우선 해결할 남은 이견 (전체 원문과 함께 대조):\n${contextPreview(unresolved.map((item) => `- ${item}`).join('\n'), 6000)}` : '',
             round === 1 ? '상대 답변의 주장과 산출물을 구체적으로 반박·검증하세요. 동의하는 점도 근거와 함께 밝히고, 개선된 콘티나 결과 초안을 직접 제시하세요.'
               : '상대의 직전 반론을 평가하고 재반론하세요. 수용할 지적을 반영해 산출물 초안을 구체적으로 수정하고 남은 이견을 명시하세요.',
             '파일을 수정하지 마세요. 다른 모델이 확인할 수 있도록 근거와 파일 경로를 적으세요.',
-          ].join('\n\n'),
+            untilAgreement ? '답변 첫머리에 ## 합의된 사항과 ## 남은 이견을 글머리표로 적으세요. 모든 쟁점이 실제 해결된 경우에만 남은 이견에 "- 없음"을 쓰세요. 합의를 꾸미지 마세요.' : '',
+          ].filter(Boolean).join('\n\n'),
         }, 'project');
         await event(projectPath, initial.project.id, 'chat', provider, result.text, undefined, round,
           { replyTo: messageId, discussionRound: round, transcript: result.transcript, sessionId: result.sessionId ?? null });
+        return result.text;
       }));
+      const failed = outcomes.find((item): item is PromiseRejectedResult => item.status === 'rejected');
+      if (failed) throw failed.reason;
+      const roundReplies = outcomes.map((item) => (item as PromiseFulfilledResult<string>).value);
+      if (untilAgreement) {
+        const summaries = roundReplies.map(parseDebateSummary);
+        const agreed = summaries[0].agreements.filter((item) => summaries[1].agreements.includes(item));
+        settled = [...new Set(agreed)];
+        unresolved = [...new Set(summaries.flatMap((item) => item.disagreements)
+          .filter((item) => !isNoDisagreement(item)))];
+        agreementReached = roundReplies.every(explicitlyAgreed);
+      }
     }), Promise.resolve());
     const finalReplies = await replies();
-    const debateTranscript = finalReplies.map((item) => `${item.actor}${item.metadata?.discussionRound ? ` ${item.metadata.discussionRound}회차` : ' 최초 답변'}: ${item.message.slice(0, 14_000)}`)
-      .join('\n\n---\n\n').slice(-75_000);
+    const debateTranscript = await discussionContext(projectPath, [request, ...finalReplies], `프로젝트: ${initial.project.name}\n목표: ${initial.project.goal}\n기준: ${initial.project.charter || '추가 제약 없음'}`);
+    const reporter = conclusionProvider(request.message);
     const conclusion = await trackedModel({
-      projectPath, cwd: projectPath, choice: { provider: 'claude', model: String(request.metadata?.claudeModel ?? 'default') },
-      effort: request.metadata?.claudeEffort === 'default' ? undefined : String(request.metadata?.claudeEffort ?? 'medium'), phase: 'project-discussion-conclusion', readOnly: true, signal,
+      projectPath, cwd: projectPath, choice: { provider: reporter, model: String(request.metadata?.[`${reporter}Model`] ?? 'default') },
+      effort: request.metadata?.[`${reporter}Effort`] === 'default' ? undefined : String(request.metadata?.[`${reporter}Effort`] ?? 'medium'), phase: 'project-discussion-conclusion', readOnly: true, signal,
       prompt: [`사용자 요청: ${request.message}`, `Codex·Claude의 전체 토론 기록:\n${debateTranscript}`,
+        untilAgreement ? `양쪽이 남은 이견 없음이라고 명시한 상태: ${agreementReached ? '예' : '아니오'}. 아니오라면 토론을 최대 10회까지 진행한 뒤 멈춘 상태이며 합의 완료로 표기하지 마세요.` : '',
         '두 모델이 실제로 서로의 반론에 답했는지 평가하세요. 결론의 첫 부분에 ## 합의된 사항, ## 남은 이견, ## 다음 지시·검증 제목을 순서대로 쓰고 각 항목을 짧은 글머리표로 작성하세요. 미해결 이견에는 두 모델의 입장과 근거를 적고, 이견이 없으면 "없음"이라고 쓰세요. 이어서 실행 가능한 최종 산출물 초안과 검증 기준을 제시하세요. 해결되지 않은 이견은 합의로 꾸미지 마세요. 사용자에게 다시 단순 계획만 제안하지 마세요. 파일은 수정하지 마세요.'].join('\n\n'),
     }, 'project');
-    await event(projectPath, initial.project.id, 'decision', 'claude', conclusion.text, undefined, undefined,
-      { replyTo: messageId, discussionConclusion: true, transcript: conclusion.transcript, sessionId: conclusion.sessionId ?? null });
+    await event(projectPath, initial.project.id, 'decision', reporter, conclusion.text, undefined, undefined,
+      { replyTo: messageId, discussionConclusion: true, consensusReached: finalConsensus(providers.map((provider) => finalReplies.filter((item) => item.actor === provider).at(-1)!.message), conclusion.text) ?? (untilAgreement ? false : null),
+        discussionStopReason: untilAgreement ? agreementReached ? 'agreement' : 'round-limit' : 'configured-rounds',
+        discussionRoundsCompleted: Math.max(0, ...finalReplies.map((item) => Number(item.metadata?.discussionRound) || 0)),
+        transcript: conclusion.transcript, sessionId: conclusion.sessionId ?? null });
     return snapshot(projectPath);
   };
 
+  const updateGate = new UpdateGate();
   const service: Service = {
-    listProjects: async (): Promise<Project[]> => (await Promise.allSettled((await readRegisteredPaths())
-      .map(async (projectPath) => ({ ...await readProject(projectPath), path: path.resolve(projectPath) }))))
+    listModelActivities: async () => activities.list(),
+    prepareForUpdate: () => updateGate.freeze(),
+    listProjects: async (): Promise<Project[]> => recentProjects((await Promise.allSettled((await readRegisteredPaths())
+      .map(projectWithActivity)))
       .filter((result): result is PromiseFulfilledResult<Project> => result.status === 'fulfilled')
-      .map((result) => result.value),
+      .map((result) => result.value)),
     reconnectProject: async (projectPath: string): Promise<ProjectSnapshot> => {
       const selected = path.resolve(projectPath);
       const resolved = path.basename(selected).toLowerCase() === '.llm-collaboration' ? path.dirname(selected) : selected;
@@ -640,13 +721,26 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
     listLocalConversations,
     refreshModelCatalogs: async () => Promise.all(providers.map(async (provider) =>
       discoverModelCatalog(provider, await cliPathFor(provider)))),
-    sendProjectMessage: async (projectPath: string, message: string, target: Provider | 'both', models: Partial<Record<Provider, ChatModelSettings>> = {}, files: ChatFileInput[] = [], discussion = false): Promise<ProjectSnapshot> => {
+    sendProjectMessage: async (projectPath: string, message: string, target: Provider | 'both', models: Partial<Record<Provider, ChatModelSettings>> = {}, files: ChatFileInput[] = [], discussion = false, discussionRounds?: number, outputDirectory?: string): Promise<ProjectSnapshot> => {
       const resolved = path.resolve(projectPath);
+      let output: string | undefined;
+      if (outputDirectory !== undefined) {
+        if (target === 'both' || discussion) throw new Error('파일 작업은 한 모델을 선택하고 토론을 해제하세요.');
+        if (typeof outputDirectory !== 'string' || !path.isAbsolute(outputDirectory)) throw new Error('파일 작업의 저장 폴더를 선택하세요.');
+        output = await realpath(outputDirectory);
+        const info = await lstat(outputDirectory);
+        if (!info.isDirectory() || info.isSymbolicLink() || output === path.parse(output).root
+          || /(?:^|[\\/])(?:\.git|\.llm-collaboration|\.codex|\.claude|Windows|Program Files(?: \(x86\))?)(?:[\\/]|$)/iu.test(output)) {
+          throw new Error('일반 산출물 폴더를 선택하세요. 시스템·설정·기록 폴더는 사용할 수 없습니다.');
+        }
+      }
       const text = message.trim();
       if ((!text && !files.length) || text.length > 20_000) throw new Error('메시지 또는 첨부 파일을 입력하세요. 메시지는 최대 20,000자입니다.');
       if (!Array.isArray(files) || files.length > 5 || files.some((file) => typeof file !== 'string'
         && (!file || typeof file !== 'object' || typeof file.name !== 'string' || typeof file.data !== 'string'))) throw new Error('첨부 파일은 최대 5개입니다.');
       if (target !== 'both' && !providers.includes(target)) throw new Error('채팅 대상을 선택하세요.');
+      const selectedDiscussionRounds = discussionRounds === undefined ? undefined
+        : discussion && target === 'both' && discussionRounds === -1 ? -1 : roundCount(discussionRounds);
       const selectedModels = Object.fromEntries(providers.map((provider) => [provider, {
         model: (models?.[provider]?.model ?? '').trim(), effort: (models?.[provider]?.effort ?? '').trim(),
       }])) as Record<Provider, ChatModelSettings>;
@@ -682,7 +776,8 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
         const userMessage = await event(resolved, project.id, 'chat', 'user', text || '첨부 파일을 확인해 주세요.', undefined, undefined,
           { target, codexModel: selectedModels.codex.model || 'default', claudeModel: selectedModels.claude.model || 'default',
             codexEffort: selectedModels.codex.effort || 'default', claudeEffort: selectedModels.claude.effort || 'default',
-            attachments: JSON.stringify(attachments), discussion: target === 'both' && (discussion || /토론|논쟁|반론|debate/iu.test(text)) });
+            attachments: JSON.stringify(attachments), outputDirectory: output ?? null, discussion: !output && target === 'both' && (discussion || /토론|논쟁|반론|debate/iu.test(text)),
+            discussionRounds: selectedDiscussionRounds ?? project.defaultDebateRounds });
         const targets = target === 'both' ? providers : [target];
         await Promise.all(targets.map(async (provider) => {
           try {
@@ -708,7 +803,7 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
               .map(async (conversation) => conversationContext(conversation, await readImportedTurns(resolved, conversation.id)))))
               .join('\n\n---\n\n').slice(0, 42_000);
             const result = await trackedModel({
-              projectPath: resolved, cwd: resolved, choice: { provider, model: selectedModels[provider].model || 'default' },
+              projectPath: resolved, cwd: output ?? resolved, choice: { provider, model: selectedModels[provider].model || 'default' },
               effort: selectedModels[provider].effort || undefined,
               imagePaths: provider === 'codex' ? attachments.filter((file) => isImageAttachment(file.name)).map((file) => path.join(resolved, file.path)) : [],
               prompt: [
@@ -722,10 +817,12 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
                 recent && `공유 채팅의 최근 대화:\n${recent}`,
                 attachmentLines && `이번 요청의 첨부 파일 (프로젝트 Git에 저장됨; 필요한 경우 경로에서 열어 확인):\n${attachmentLines}`,
                 `현재 사용자 메시지 (${target === 'both' ? '두 모델 모두' : provider}에게 전달):\n${text}`,
-                '현재 메시지에 직접 답하고 요청한 산출물의 초안을 본문에 작성하세요. 실제 파일 변경이 필요하면 별도 업무 실행 단계를 제안하세요.',
+                output ? `파일 작업 요청입니다. 실제 새 산출물을 다음 폴더에 저장하고 저장 경로·확인 결과를 보고하세요: ${output}\n원본을 읽되 수정·삭제하지 마세요. 기존 산출물을 덮어쓰지 말고 새 이름을 사용하세요. 이 폴더 밖 파일 변경과 설정·자격증명 변경, 유료 생성·외부 게시를 하지 마세요.`
+                  : '검토·토론 모드입니다. 파일과 앱 데이터를 변경하지 마세요. 실제 파일 생성이 필요하면 한 모델을 선택하고 파일 작업 모드와 저장 폴더를 지정하도록 안내하세요.',
+                'AI 영상 스토리지 등 외부 도구는 이 CLI에 실제 연결된 도구만 사용하세요. 스킬 파일이 있다는 이유로 MCP 연결을 가정하지 마세요. 도구 없음과 권한 거부를 구분하고 실패한 도구 이름과 오류를 보고하세요. 연결·보안 설정을 임의 변경하거나 우회하지 마세요.',
               ].filter(Boolean).join('\n\n'),
-              phase: 'project-chat', readOnly: true, signal: controller.signal,
-            }, 'project');
+              phase: output ? 'project-file-work' : 'project-chat', readOnly: !output, signal: controller.signal,
+            }, output ? 'execution' : 'project');
             await event(resolved, project.id, 'chat', provider, result.text, undefined, undefined,
               { replyTo: userMessage.id, transcript: result.transcript, sessionId: result.sessionId ?? null,
                 model: selectedModels[provider].model || 'default', effort: selectedModels[provider].effort || 'default' });
@@ -764,7 +861,7 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
         return paths;
       });
       const [projectResults, cliResults] = await Promise.all([
-        Promise.allSettled(projectPaths.map(async (projectPath) => ({ ...await readProject(projectPath), path: path.resolve(projectPath) }))),
+        Promise.allSettled(projectPaths.map(projectWithActivity)),
         cliStatuses(),
       ]);
       const projects = projectResults
@@ -781,7 +878,7 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
         return { path: projectPath, missing: false, reason: errorText(result.reason) };
       }));
       return {
-        projects,
+        projects: recentProjects(projects),
         missingProjectPaths: failures.filter((item) => item?.missing).map((item) => item!.path),
         unavailableProjectPaths: failures.filter((item) => item && !item.missing)
           .map((item) => ({ path: item!.path, reason: item!.reason })),
@@ -1126,6 +1223,7 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
         } else {
           const addition = responses.map((response) => `${response.actor}: ${response.message}`).join('\n\n');
           await replaceTask(resolved, taskId, (task) => ({ ...task, debateSummary: `${task.debateSummary || ''}\n\n추가 질문: ${followUp.message.trim()}\n${addition}`.trim(), status: 'ready' }));
+          await event(resolved, project.id, 'status', 'system', '추가 질문의 답변을 저장하고 실행 준비 상태로 돌아왔습니다.', taskId, undefined, { taskStatus: 'ready' });
         }
       } catch (error) {
         const { project } = await taskById(resolved, taskId);
@@ -1195,7 +1293,7 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
           return changed;
         });
         await replaceTask(resolved, taskId, (value) => ({ ...value, status: 'approved', artifacts: files }));
-        await event(resolved, initial.project.id, 'artifact', 'system', `검수된 산출물을 프로젝트 Git 브랜치에 통합했습니다.\n${files.join('\n')}`, taskId, undefined, { branch: worktree.branch });
+        await event(resolved, initial.project.id, 'artifact', 'system', `검수된 산출물을 프로젝트 Git 브랜치에 통합했습니다.\n${files.join('\n')}`, taskId, undefined, { branch: worktree.branch, taskStatus: 'approved' });
         await gitLock(resolved, () => removeTaskWorktree(resolved, worktree.directory, worktree.branch)).catch(async (error: unknown) => {
           await event(resolved, initial.project.id, 'error', 'system', `작업 공간 정리 실패: ${errorText(error)}`, taskId);
         });
@@ -1299,5 +1397,9 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
         { sessionId, handedOffAt });
     }),
   };
-  return service;
+  return new Proxy(service, { get(target, name, receiver) {
+    const value = Reflect.get(target, name, receiver);
+    if (typeof value !== 'function' || name === 'prepareForUpdate' || name === 'listProjects') return value;
+    return (...args: unknown[]) => updateGate.run(async () => Reflect.apply(value, target, args));
+  } });
 };

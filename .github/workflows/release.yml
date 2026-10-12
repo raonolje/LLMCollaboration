@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing version tag to rebuild
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -13,11 +19,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: npm
           cache-dependency-path: mobile/package-lock.json
+      - run: npm ci
       - run: npm ci
         working-directory: mobile
       - run: npm run typecheck
@@ -26,6 +35,10 @@ jobs:
         working-directory: mobile
 
   build:
+    env:
+      GIT_CONFIG_COUNT: '1'
+      GIT_CONFIG_KEY_0: core.longpaths
+      GIT_CONFIG_VALUE_0: 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -43,6 +56,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+      - name: Verify release version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: test "$RELEASE_TAG" = "v$(node -p "require('./package.json').version")"
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -72,4 +92,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release create "$GITHUB_REF_NAME" release/* --title "LLM Collaboration $GITHUB_REF_NAME" --generate-notes --latest
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: gh release create "$RELEASE_TAG" release/* --title "LLM Collaboration $RELEASE_TAG" --generate-notes --latest

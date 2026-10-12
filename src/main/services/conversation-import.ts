@@ -48,6 +48,20 @@ const conversationTitle = (turns: readonly ConversationTurn[]): string =>
     ?? turns.find((turn) => turn.role === 'user')?.text ?? turns[0]?.text ?? '제목 없는 대화')
     .replace(/\s+/gu, ' ').slice(0, 100);
 
+// Sessions started by this app already belong to a project. Showing them as
+// external chats crowds out the user's actual Codex and Claude conversations.
+export const isManagedConversation = (turns: readonly ConversationTurn[]): boolean => {
+  const first = turns.find((turn) => turn.role === 'user' && !/^\s*<(?:environment_context|system|developer)[\s>]/iu.test(turn.text))?.text.trimStart() ?? '';
+  const next = turns.filter((turn) => turn.role === 'user').slice(0, 3).map((turn) => turn.text).join('\n');
+  return /^프로젝트 .+의 협업 대화를 시작합니다\./u.test(first)
+    || /^당신은 (?:codex|claude)입니다\. 다른 모델과 함께 같은 업무의 계획을 논쟁합니다\./iu.test(first)
+    || first.startsWith('당신은 이 업무의 실행 담당자입니다. 아래 업무를 실제 파일에 구현하세요.')
+    || first.startsWith('당신은 다른 모델이 구현한 결과의 독립 검수자입니다.')
+    || first.startsWith('두 모델의 토론과 최종 평가를 바탕으로 실행 가능한 단일 결론을 작성하세요.')
+    || (first.startsWith('Follow the full task instructions supplied on standard input.') && /당신은 (?:codex|claude)입니다|당신은 이 업무의 실행 담당자입니다|당신은 다른 모델이 구현한 결과의 독립 검수자입니다|프로젝트: [^\n]+\n목표:/iu.test(next))
+    || (/^프로젝트: [^\n]+\n목표:/u.test(first) && first.includes('\n사용자 요청:'));
+};
+
 type CodexMetadata = { id: string; title: string | null; name: string | null; cwd: string | null; rollout_path: string | null };
 const codexMetadata = (): Map<string, CodexMetadata> => {
   try {
@@ -104,18 +118,20 @@ export const listLocalConversations = async (target?: LaunchRequest): Promise<Co
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
     const requested = target?.provider === provider
       ? sorted.find((file) => file.filePath.toLowerCase().includes(target.sessionId.toLowerCase())) : undefined;
-    return [...(requested ? [requested] : []), ...sorted.filter((file) => file !== requested).slice(0, 40)];
+    return [...(requested ? [requested] : []), ...sorted.filter((file) => file !== requested).slice(0, 80)];
   }));
-  const recent = candidates.flat().sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)).slice(0, 100);
+  const recent = candidates.flat().sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)).slice(0, 160);
   const requested = target ? candidates.flat().find((file) => file.provider === target.provider
     && file.filePath.toLowerCase().includes(target.sessionId.toLowerCase())) : undefined;
   if (requested && !recent.includes(requested)) recent.unshift(requested);
   return recent.reduce<Promise<ConversationCandidate[]>>(async (previous, file) => {
     const collected = await previous;
+    if (collected.length >= 60 && file !== requested) return collected;
     try {
       const raw = await readFile(file.filePath, 'utf8');
       const { sessionId, turns } = parseConversation(file.provider, raw);
       if (!sessionId || !turns.length || collected.some((item) => item.provider === file.provider && item.sessionId === sessionId)) return collected;
+      if (file !== requested && isManagedConversation(turns)) return collected;
       const codex = file.provider === 'codex' ? codexTitles.get(sessionId) : undefined;
       const claude = metadataFromRecords(file.provider, raw);
       return [...collected, {

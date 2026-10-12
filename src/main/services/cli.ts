@@ -1,3 +1,5 @@
+import { progressFromLine, type CliProgress } from '../../shared/model-activity';
+import { cliProgressFromLine } from '../../shared/cli-progress';
 import { spawn, execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
@@ -5,6 +7,7 @@ import { mkdir, readdir, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { finished } from 'node:stream/promises';
+import { StringDecoder } from 'node:string_decoder';
 import { promisify } from 'node:util';
 import crossSpawn from 'cross-spawn';
 import * as pty from 'node-pty';
@@ -198,6 +201,7 @@ export type CliRequest = Readonly<{
   sessionId?: string;
   configuredPath?: string;
   imagePaths?: string[];
+  onProgress?: (progress: CliProgress) => void;
 }>;
 
 export type CliResult = Readonly<{
@@ -327,10 +331,12 @@ export const runCli = async (request: CliRequest): Promise<CliResult> => {
     signal: request.signal,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
+  request.onProgress?.({ kind: 'started', processId: child.pid });
   child.stdin!.end(request.prompt);
 
   let latest = '';
   let stderr = '';
+  let streamError = '';
   let pendingOut = '';
   let pendingErr = '';
   let sessionId = request.sessionId;
@@ -342,10 +348,15 @@ export const runCli = async (request: CliRequest): Promise<CliResult> => {
     else pendingErr = remainder;
     lines.filter(Boolean).map((line) => {
       log.write(`${JSON.stringify({ type: stream, line })}\n`);
+      request.onProgress?.(stream === 'stdout' ? cliProgressFromLine(line, request.choice.provider) : { kind: progressFromLine(line) });
       if (stream === 'stdout') {
         latest = extractText(line) || latest;
         try {
-          const record = JSON.parse(line) as { type?: string; thread_id?: unknown; session_id?: unknown };
+          const record = JSON.parse(line) as { type?: string; thread_id?: unknown; session_id?: unknown; message?: unknown; error?: { message?: unknown } };
+          if (record.type === 'error' || record.type === 'turn.failed') {
+            const message = record.error?.message ?? record.message;
+            if (typeof message === 'string') streamError = message.slice(-2000);
+          }
           const candidate = record.type === 'thread.started' ? record.thread_id : record.session_id;
           if (isSessionId(candidate)) sessionId = candidate;
         } catch { /* Raw output remains available in the transcript. */ }
@@ -354,19 +365,24 @@ export const runCli = async (request: CliRequest): Promise<CliResult> => {
       return line;
     });
   };
-  child.stdout!.on('data', (data: Buffer) => flush('stdout', data.toString('utf8')));
-  child.stderr!.on('data', (data: Buffer) => flush('stderr', data.toString('utf8')));
+  const stdoutDecoder = new StringDecoder('utf8'), stderrDecoder = new StringDecoder('utf8');
+  child.stdout!.on('data', (data: Buffer) => flush('stdout', stdoutDecoder.write(data)));
+  child.stderr!.on('data', (data: Buffer) => flush('stderr', stderrDecoder.write(data)));
 
   const result = await new Promise<number>((resolve, reject) => {
-    child.once('error', reject);
-    child.once('close', (code) => resolve(code ?? 1));
+    let processError: Error | undefined;
+    child.once('error', (error) => { processError = error; if (!child.pid) reject(error); });
+    child.once('close', (code) => processError ? reject(processError) : resolve(code ?? 1));
   }).finally(async () => {
+    flush('stdout', stdoutDecoder.end());
+    flush('stderr', stderrDecoder.end());
     if (pendingOut) flush('stdout', '\n');
     if (pendingErr) flush('stderr', '\n');
     log.end();
     await finished(log);
   });
-  if (result !== 0) throw new Error(`${request.choice.provider} 실행 실패 (${result}): ${stderr.slice(-2000) || '자세한 내용은 실행 기록을 확인하세요.'}`);
+  request.onProgress?.({ kind: 'exited' });
+  if (result !== 0) throw new Error(`${request.choice.provider} 실행 실패 (${result}): ${streamError || stderr.slice(-2000) || '자세한 내용은 실행 기록을 확인하세요.'}`);
   if (!latest.trim()) throw new Error(`${request.choice.provider}가 결과 문장을 반환하지 않았습니다. 실행 기록: ${relative}`);
   if (!sessionId) throw new Error(`${request.choice.provider}가 대화 세션 ID를 반환하지 않았습니다. 실행 기록: ${relative}`);
   return { text: latest.trim(), transcript: relative, sessionId };

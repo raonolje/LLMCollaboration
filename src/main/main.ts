@@ -6,6 +6,15 @@ import { installChatSkills, parseLaunchUrl } from './chat-link';
 import { recycleDirectoryWithWindows } from './windows-recycle';
 import { checkAppUpdate, downloadAppUpdate, launchDownloadedUpdate } from './updater';
 import { createRemote } from './remote';
+import { windowsAppId, windowsLaunchDetails } from './windows-launch';
+import { prepareWindowsUpdate, launchWindowsUpdate, acknowledgeWindowsUpdate } from './windows-update';
+import { readUpdateDraft, saveUpdateDraft, clearUpdateDraft } from './update-recovery';
+
+const windowsLaunch = process.platform === 'win32'
+  ? windowsLaunchDetails(process.execPath, process.env.PORTABLE_EXECUTABLE_FILE,
+    process.defaultApp ? process.argv[1] : undefined)
+  : null;
+if (windowsLaunch) app.setAppUserModelId(windowsAppId);
 
 let mainWindow: BrowserWindow | null = null;
 let closeRemote: (() => Promise<void>) | null = null;
@@ -36,8 +45,8 @@ const createWindow = (): BrowserWindow => {
   const window = new BrowserWindow({
     width: 1500,
     height: 960,
-    minWidth: 1050,
-    minHeight: 720,
+    minWidth: 720,
+    minHeight: 560,
     backgroundColor: '#10141c',
     title: 'LLM Collaboration',
     icon: path.join(app.getAppPath(), 'assets', 'icon.png'),
@@ -50,7 +59,17 @@ const createWindow = (): BrowserWindow => {
     },
   });
 
+  if (windowsLaunch) window.setAppDetails(windowsLaunch.appDetails);
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  window.webContents.on('before-input-event', (event, input) => {
+    if (!(process.platform === 'darwin' ? input.meta : input.control) || input.alt) return;
+    const key = input.key.toLowerCase();
+    if (!['+', '=', 'add', '-', '_', 'subtract', '0'].includes(key)) return;
+    event.preventDefault();
+    const current = window.webContents.getZoomFactor();
+    const next = key === '0' ? 1 : Math.min(2, Math.max(1, Math.round(current * 4 + (['+', '=', 'add'].includes(key) ? 1 : -1)) / 4));
+    window.webContents.setZoomFactor(next);
+  });
   if (process.platform !== 'darwin') window.setMenuBarVisibility(false);
   window.webContents.on('will-navigate', (event) => event.preventDefault());
 
@@ -66,17 +85,20 @@ const createWindow = (): BrowserWindow => {
 };
 
 const registerHandlers = (): void => {
+  let updatePending = false;
+  let updateStarting = Boolean(process.env.LLM_COLLAB_UPDATE_HANDOFF);
   let remote: ReturnType<typeof createRemote> | undefined;
   const service = createService({
     registryPath: path.join(app.getPath('userData'), 'projects.json'),
     emit: (event: CollaborationEvent) => { mainWindow?.webContents.send('collab:event', event); remote?.publishEvent(event); },
     trashItem: trashItemWithFallback,
   });
-  remote = createRemote(service, app.getPath('userData'), { webRoot: path.join(app.getAppPath(), 'mobile', 'web-dist') });
+  remote = createRemote(service, app.getPath('userData'), { webRoot: path.join(app.getAppPath(), 'mobile', 'web-dist'), maintenance: () => updatePending || updateStarting });
   closeRemote = remote.close;
   void remote.initialize();
 
   ipcMain.handle('collab:bootstrap', () => service.bootstrap());
+  ipcMain.handle('collab:listModelActivities', () => service.listModelActivities());
   ipcMain.handle('collab:chooseDirectory', async () => {
     const options: Electron.OpenDialogOptions = {
       title: '프로젝트 폴더 선택',
@@ -114,12 +136,47 @@ const registerHandlers = (): void => {
   ipcMain.handle('collab:setRemoteEnabled', (_event, enabled: boolean) => remote.setEnabled(enabled));
   ipcMain.handle('collab:rotateRemoteToken', () => remote.rotateToken());
   ipcMain.handle('collab:checkAppUpdate', () => checkAppUpdate(app.getVersion(), process.platform, process.arch, !!process.env.PORTABLE_EXECUTABLE_FILE));
-  ipcMain.handle('collab:downloadAppUpdate', async () => {
-    const downloaded = await downloadAppUpdate(app.getVersion(), process.platform, process.arch,
-      !!process.env.PORTABLE_EXECUTABLE_FILE, app.getPath('userData'));
-    launchDownloadedUpdate(downloaded);
-    setTimeout(() => app.quit(), 200);
-    return downloaded;
+  ipcMain.handle('collab:readUpdateDraft', () => readUpdateDraft(app.getPath('userData')));
+  ipcMain.handle('collab:clearUpdateDraft', () => clearUpdateDraft(app.getPath('userData')));
+  ipcMain.handle('collab:updateReady', async (event, state) => {
+    if (event.sender !== mainWindow?.webContents) throw new Error('앱의 시작 화면에서 다시 시도해 주세요.');
+    try {
+      await acknowledgeWindowsUpdate(app.getPath('userData'), app.getVersion(), process.env.LLM_COLLAB_UPDATE_HANDOFF, state);
+      updateStarting = false;
+      delete process.env.LLM_COLLAB_UPDATE_HANDOFF;
+    } catch (error) {
+      if (updateStarting) { await closeRemote?.(); setImmediate(() => app.quit()); }
+      throw error;
+    }
+  });
+  ipcMain.handle('collab:downloadAppUpdate', async (event, draft: unknown) => {
+    if (event.sender !== mainWindow?.webContents) throw new Error('앱의 업데이트 화면에서 다시 시도해 주세요.');
+    if (updatePending) throw new Error('업데이트가 이미 진행 중입니다.');
+    updatePending = true;
+    let resume: (() => void) | undefined;
+    let draftSaved = false;
+    try {
+      const directory = app.getPath('userData');
+      await saveUpdateDraft(directory, draft);
+      draftSaved = true;
+      resume = await service.prepareForUpdate();
+      const portable = !!process.env.PORTABLE_EXECUTABLE_FILE;
+      const downloaded = await downloadAppUpdate(app.getVersion(), process.platform, process.arch, portable, directory);
+      if (process.platform === 'win32') {
+        const manifest = await prepareWindowsUpdate(downloaded, { directory, portable,
+          target: process.env.PORTABLE_EXECUTABLE_FILE ?? process.execPath, currentVersion: app.getVersion(),
+          runtimePid: process.pid, launcherPid: process.ppid, projectPaths: (await service.listProjects()).map((project) => project.path) });
+        await launchWindowsUpdate(manifest);
+      } else launchDownloadedUpdate(downloaded.filePath);
+      await closeRemote?.().catch(() => undefined);
+      setImmediate(() => app.quit());
+      return downloaded.filePath;
+    } catch (error) {
+      if (draftSaved) await clearUpdateDraft(app.getPath('userData')).catch(() => undefined);
+      resume?.();
+      updatePending = false;
+      throw error;
+    }
   });
   ipcMain.handle('collab:createProject', (_event, input) => service.createProject(input));
   ipcMain.handle('collab:reconnectProject', (_event, projectPath) => service.reconnectProject(projectPath));
@@ -128,7 +185,7 @@ const registerHandlers = (): void => {
     const result = mainWindow ? await dialog.showOpenDialog(mainWindow, options) : await dialog.showOpenDialog(options);
     return result.canceled ? [] : result.filePaths;
   });
-  ipcMain.handle('collab:sendProjectMessage', (_event, projectPath, message, target, models, files, discussion) => service.sendProjectMessage(projectPath, message, target, models, files, discussion));
+  ipcMain.handle('collab:sendProjectMessage', (_event, projectPath, message, target, models, files, discussion, discussionRounds, outputDirectory) => service.sendProjectMessage(projectPath, message, target, models, files, discussion, discussionRounds, outputDirectory));
   ipcMain.handle('collab:continueProjectDiscussion', (_event, projectPath, messageId) => service.continueProjectDiscussion(projectPath, messageId));
   ipcMain.handle('collab:cancelProjectMessage', (_event, projectPath) => service.cancelProjectMessage(projectPath));
   ipcMain.handle('collab:listLocalConversations', (_event, target?: LaunchRequest) => service.listLocalConversations(target));
@@ -178,7 +235,9 @@ const registerHandlers = (): void => {
 
 void app.whenReady().then(() => {
   if (!hasInstanceLock) return;
-  if (process.defaultApp && process.argv[1]) {
+  if (windowsLaunch) {
+    app.setAsDefaultProtocolClient('llmcollaboration', windowsLaunch.target, windowsLaunch.args);
+  } else if (process.defaultApp && process.argv[1]) {
     app.setAsDefaultProtocolClient('llmcollaboration', process.execPath, [path.resolve(process.argv[1])]);
   } else app.setAsDefaultProtocolClient('llmcollaboration');
   void installChatSkills().catch(() => undefined);

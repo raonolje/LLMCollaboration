@@ -1,3 +1,4 @@
+import type { ModelActivity } from './model-activity';
 export type Provider = 'codex' | 'claude';
 
 export type ModelChoice = Readonly<{
@@ -25,6 +26,12 @@ export type ModelCatalog = Readonly<{
   models: ModelOption[];
   warning?: string;
 }>;
+export type AppUpdateDraft = Readonly<{
+  version: 1; projectPath?: string; text: string; files: ChatFileInput[];
+  target: Provider | 'both'; models: Partial<Record<Provider, ChatModelSettings>>;
+  discussion: boolean; discussionRounds: number; composerOpen: boolean; outputDirectory?: string;
+}>;
+export type AppUpdateReady = Readonly<{ sidebarViewport: boolean; independentScroll: boolean; draftRestored: boolean }>;
 export type AppUpdateCheck = Readonly<{
   currentVersion: string;
   latestVersion: string;
@@ -114,6 +121,7 @@ export type Task = TaskInput & Readonly<{
 }>;
 
 export type Project = Readonly<{
+  lastActivityAt?: string;
   id: string;
   name: string;
   path: string;
@@ -192,20 +200,24 @@ export type ProjectSnapshot = Readonly<{
 
 export type CollaborationAPI = Readonly<{
   bootstrap: () => Promise<Bootstrap>;
+  listModelActivities: () => Promise<ModelActivity[]>;
   chooseDirectory: () => Promise<string | null>;
   chooseCliExecutable: () => Promise<string | null>;
   setCliExecutable: (provider: Provider, filePath: string | null) => Promise<CliStatus[]>;
   refreshCliStatus: () => Promise<CliStatus[]>;
   refreshModelCatalogs: () => Promise<ModelCatalog[]>;
   checkAppUpdate: () => Promise<AppUpdateCheck>;
-  downloadAppUpdate: () => Promise<string>;
+  downloadAppUpdate: (draft: AppUpdateDraft) => Promise<string>;
+  readUpdateDraft: () => Promise<AppUpdateDraft | null>;
+  clearUpdateDraft: () => Promise<void>;
+  updateReady: (state: AppUpdateReady) => Promise<void>;
   remoteStatus: () => Promise<RemoteStatus>;
   setRemoteEnabled: (enabled: boolean) => Promise<RemoteStatus>;
   rotateRemoteToken: () => Promise<RemoteStatus>;
   createProject: (input: ProjectInput) => Promise<ProjectSnapshot>;
   reconnectProject: (projectPath: string) => Promise<ProjectSnapshot>;
   chooseChatFiles: () => Promise<string[]>;
-  sendProjectMessage: (projectPath: string, message: string, target: Provider | 'both', models: Partial<Record<Provider, ChatModelSettings>>, files?: ChatFileInput[], discussion?: boolean) => Promise<ProjectSnapshot>;
+  sendProjectMessage: (projectPath: string, message: string, target: Provider | 'both', models: Partial<Record<Provider, ChatModelSettings>>, files?: ChatFileInput[], discussion?: boolean, discussionRounds?: number, outputDirectory?: string) => Promise<ProjectSnapshot>;
   continueProjectDiscussion: (projectPath: string, messageId: string) => Promise<ProjectSnapshot>;
   cancelProjectMessage: (projectPath: string) => Promise<void>;
   listLocalConversations: (target?: LaunchRequest) => Promise<ConversationCandidate[]>;

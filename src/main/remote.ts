@@ -51,7 +51,7 @@ const message = (error: unknown): string => error instanceof Error ? error.messa
 const projectBasePath = (): string => path.join(homedir(), 'Documents', 'LLM Collaboration');
 const projectFolderName = (name: string): string => name.normalize('NFKC').replace(/[<>:"/\\|?*\u0000-\u001f]/gu, '-').replace(/[. ]+$/u, '').trim().slice(0, 60) || 'project';
 
-export const createRemote = (service: Service, userData: string, options: { address?: string; port?: number; webRoot?: string } = {}) => {
+export const createRemote = (service: Service, userData: string, options: { address?: string; port?: number; webRoot?: string; maintenance?: () => boolean } = {}) => {
   const settingsFile = path.join(userData, 'remote-settings.json');
   let server: Server | null = null;
   let boundAddress: string | undefined;
@@ -116,6 +116,9 @@ export const createRemote = (service: Service, userData: string, options: { addr
         return;
       }
       if (!authorized(request, (await readSettings()).token)) { json(response, 401, { error: '연결 코드가 올바르지 않습니다.' }); return; }
+      if (options.maintenance?.() && !(request.method === 'GET' && ['/v1/health', '/v1/operations', '/v1/projects', '/v1/events', '/v1/model-activities'].includes(url.pathname))) {
+        json(response, 503, { error: '업데이트 준비 중입니다. 토론과 업무가 끝난 뒤 자동 재시작합니다.' }); return;
+      }
       const segments = url.pathname.split('/').filter(Boolean);
       if (request.method === 'GET' && url.pathname === '/v1/events') {
         response.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Content-Type-Options': 'nosniff' });
@@ -152,6 +155,9 @@ export const createRemote = (service: Service, userData: string, options: { addr
         const input: ProjectInput = { name, goal, path: directory, defaultDebateRounds: rounds,
           ...(initialConversation ? { initialConversation: { provider: initialConversation.provider, filePath: initialConversation.filePath } } : {}) };
         json(response, 201, await service.createProject(input)); return;
+      }
+      if (request.method === 'GET' && url.pathname === '/v1/model-activities') {
+        json(response, 200, { activities: await service.listModelActivities() }); return;
       }
       if (request.method === 'GET' && url.pathname === '/v1/models') {
         json(response, 200, { catalogs: await service.refreshModelCatalogs() }); return;
@@ -219,9 +225,11 @@ export const createRemote = (service: Service, userData: string, options: { addr
           || typeof file.name !== 'string' || typeof file.data !== 'string')) throw new Error('첨부 파일은 최대 5개입니다.');
         const chatMessage = files.length && !String(body.message ?? '').trim() ? '' : text(body.message);
         const discussion = body.discussion === true;
-        json(response, 202, launch('chat', id, () => files.length || discussion
-          ? service.sendProjectMessage(directory, chatMessage, chatTarget, selected, files, discussion)
-          : service.sendProjectMessage(directory, chatMessage, chatTarget, selected), { target: chatTarget })); return;
+        const discussionRounds = body.discussionRounds === undefined ? undefined : Number(body.discussionRounds);
+        json(response, 202, launch('chat', id, () => discussionRounds !== undefined
+          ? service.sendProjectMessage(directory, chatMessage, chatTarget, selected, files, discussion, discussionRounds)
+          : files.length || discussion ? service.sendProjectMessage(directory, chatMessage, chatTarget, selected, files, discussion)
+            : service.sendProjectMessage(directory, chatMessage, chatTarget, selected), { target: chatTarget })); return;
       }
       if (action === 'cancel-chat') { await service.cancelProjectMessage(directory); json(response, 200, { ok: true }); return; }
       if (action === 'tasks' && segments.length === 4) {

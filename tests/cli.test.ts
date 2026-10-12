@@ -1,3 +1,4 @@
+import type { CliProgress } from '../src/shared/model-activity';
 import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { EventEmitter } from 'node:events';
 import os from 'node:os';
@@ -52,6 +53,47 @@ const withTemporaryWorkspace = async <T>(run: (workspace: string) => Promise<T>)
 const missingFromPath = Object.assign(new Error('spawn codex ENOENT'), { code: 'ENOENT' });
 
 describe.skipIf(process.platform !== 'win32')('Windows CLI discovery and execution', () => {
+  it('emits public progress before child exit, retains split UTF-8 and does not preview stderr', () => withTemporaryWorkspace(async (workspace) => {
+    const binary = path.join(workspace, 'codex.exe');
+    await writeFile(binary, '', 'utf8');
+    execFileAsync.mockResolvedValue({ stdout: 'Logged in using ChatGPT\n', stderr: '' });
+    const child = Object.assign(new EventEmitter(), { pid: 123, stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough() });
+    const signals: CliProgress[] = [];
+    let resolved = false;
+    spawnCli.mockReturnValue(child);
+    const pending = runCli({ projectPath: workspace, cwd: workspace, choice: { provider: 'codex', model: '' },
+      prompt: 'Local mock only', phase: 'progress-test', readOnly: true, configuredPath: binary,
+      signal: new AbortController().signal, onProgress: (signal) => signals.push(signal) }).then((result) => { resolved = true; return result; });
+    try {
+      await vi.waitFor(() => expect(child.stdout.listenerCount('data')).toBe(1));
+      child.stdout.write('{"type":"thread.started","thread_id":"00000000-0000-4000-8000-000000000001"}\n');
+      const bytes = Buffer.from(JSON.stringify({ type: 'item.completed', item: { id: 'msg1', type: 'agent_message', text: '한글 검토 중 😀' } }) + '\n');
+      for (const byte of bytes) child.stdout.write(Buffer.from([byte]));
+      child.stderr.write('{"type":"item.completed","item":{"id":"private","type":"agent_message","text":"PRIVATE STDERR"}}\n');
+      expect(resolved).toBe(false);
+      expect(signals.flatMap((signal) => signal.details ?? [])).toEqual([{ type: 'message', id: 'msg1', text: '한글 검토 중 😀' }]);
+      expect(signals.some((signal) => signal.kind === 'exited')).toBe(false);
+      // A final line without a newline is still consumed when the process closes.
+      child.stdout.write('{"type":"item.completed","item":{"id":"msg2","type":"agent_message","text":"최종 답변"}}');
+    } finally {
+      child.stdout.end(); child.stderr.end(); child.emit('close', 0);
+    }
+    expect((await pending).text).toBe('최종 답변');
+    expect(signals.at(-1)?.kind).toBe('exited');
+    expect(signals.flatMap((signal) => signal.details ?? []).at(-1)).toMatchObject({ text: '최종 답변' });
+  }));
+  it('preserves provider capacity failure from stdout instead of reporting a generic process exit', () => withTemporaryWorkspace(async (workspace) => {
+    const binary = path.join(workspace, 'codex.cmd');
+    await writeFile(binary, [
+      '@echo off', 'if "%~1"=="--version" goto version', 'if "%~1"=="login" goto auth',
+      'echo {"type":"error","message":"Selected model is at capacity. Please try a different model."}',
+      'echo {"type":"turn.failed","error":{"message":"Selected model is at capacity. Please try a different model."}}',
+      'exit /b 1', ':version', 'echo codex-cli 0.162.0', 'exit /b 0', ':auth', 'echo Logged in using ChatGPT', 'exit /b 0',
+    ].join('\r\n'), 'utf8');
+    await expect(runCli({ projectPath: workspace, cwd: workspace, choice: { provider: 'codex', model: 'default' },
+      prompt: 'Local shim only', phase: 'capacity-test', readOnly: true, signal: new AbortController().signal,
+      configuredPath: binary })).rejects.toThrow('Selected model is at capacity');
+  }));
   it('attaches images to new and resumed Codex prompts', () => {
     const request = { projectPath: 'project', cwd: 'project', choice: { provider: 'codex' as const, model: 'default' },
       prompt: 'Inspect the screenshot', phase: 'chat', readOnly: true, signal: new AbortController().signal, imagePaths: ['screenshot.png'] };
@@ -111,15 +153,20 @@ describe.skipIf(process.platform !== 'win32')('Windows CLI discovery and executi
       [true, 'ChatGPT 구독 로그인'],
       [true, 'Claude 구독 로그인 (max)'],
     ]);
+    const activitySignals: CliProgress[] = [];
     const results = await Promise.all((['codex', 'claude'] as const).map((provider) => runCli({
       projectPath: workspace,
       cwd: workspace,
       choice: { provider, model: '' },
       prompt: 'Check the shim execution path',
+      onProgress: (progress) => activitySignals.push(progress),
       phase: 'shim-smoke',
       readOnly: true,
       signal: new AbortController().signal,
     })));
+    expect(activitySignals.filter((progress) => progress.kind === 'started')).toHaveLength(2);
+    expect(activitySignals.filter((progress) => progress.kind === 'exited')).toHaveLength(2);
+    expect(activitySignals.some((progress) => progress.kind === 'output')).toBe(true);
     expect(results.map(({ text, sessionId }) => [text, sessionId])).toEqual([
       ['Codex completed', '00000000-0000-4000-8000-000000000001'],
       ['Claude completed', '00000000-0000-4000-8000-000000000002'],
