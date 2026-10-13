@@ -133,6 +133,10 @@ const registerHandlers = (): void => {
   });
   ipcMain.handle('collab:setCliExecutable', (_event, provider, filePath) => service.setCliExecutable(provider, filePath));
   ipcMain.handle('collab:refreshCliStatus', () => service.refreshCliStatus());
+  ipcMain.handle('collab:openClaudeLogin', (event) => {
+    if (event.sender !== mainWindow?.webContents) throw new Error('PC 앱에서 Claude 로그인을 시작하세요.');
+    return service.openClaudeLogin();
+  });
   ipcMain.handle('collab:refreshModelCatalogs', () => service.refreshModelCatalogs());
   ipcMain.handle('collab:remoteStatus', () => remote.status());
   ipcMain.handle('collab:setRemoteEnabled', (_event, enabled: boolean) => remote.setEnabled(enabled));

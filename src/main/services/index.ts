@@ -31,7 +31,7 @@ import type {
   TaskInput,
   TaskStatus,
 } from '../../shared/types';
-import { assertSubscription, cliStatus, handoffClaudeToDesktop, openCliSession, runCli, type CliRequest, type CliResult } from './cli';
+import { assertSubscription, cliStatus, handoffClaudeToDesktop, openClaudeLogin, openCliSession, runCli, type CliRequest, type CliResult } from './cli';
 import { debatePrompt, executionPrompt, projectChatGuidance, reviewPrompt, taskCard } from './prompts';
 import {
   appendEvent,
@@ -916,6 +916,7 @@ export const createService = ({ registryPath, emit, runModel = runCli, handoffCl
     },
 
     refreshCliStatus: cliStatuses,
+    openClaudeLogin: async (): Promise<void> => openClaudeLogin(await cliPathFor('claude')),
 
     setCliExecutable: async (provider: Provider, filePath: string | null): Promise<CliStatus[]> => {
       if (!providers.includes(provider)) throw new Error('지원하지 않는 CLI입니다.');

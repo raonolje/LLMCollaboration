@@ -209,6 +209,7 @@ export type CollaborationAPI = Readonly<{
   chooseCliExecutable: () => Promise<string | null>;
   setCliExecutable: (provider: Provider, filePath: string | null) => Promise<CliStatus[]>;
   refreshCliStatus: () => Promise<CliStatus[]>;
+  openClaudeLogin: () => Promise<void>;
   refreshModelCatalogs: () => Promise<ModelCatalog[]>;
   checkAppUpdate: () => Promise<AppUpdateCheck>;
   downloadAppUpdate: (draft: AppUpdateDraft) => Promise<string>;

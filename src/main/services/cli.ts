@@ -1,6 +1,7 @@
 import { progressFromLine, type CliProgress } from '../../shared/model-activity';
 import { cliProgressFromLine } from '../../shared/cli-progress';
 import { ClaudeControl } from './claude-control';
+import { cliFailure } from '../../shared/cli-failure';
 import type { ToolPermissionResult } from './tool-approvals';
 import { spawn, execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -232,6 +233,29 @@ const isSessionId = (value: unknown): value is string =>
 const shellQuoted = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
 const appleQuoted = (value: string): string => `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
 
+let claudeLoginWindowOpen = false;
+export const openClaudeLogin = async (configuredPath?: string): Promise<void> => {
+  if (claudeLoginWindowOpen) throw new Error('Claude 로그인 창이 이미 열려 있습니다. 해당 창에서 로그인을 완료하고 닫아 주세요.');
+  const executable = await resolveCliExecutable('claude', { configuredPath });
+  if (!executable) throw new Error('Claude CLI를 찾을 수 없습니다. 먼저 실행 파일 경로를 지정하세요.');
+  if (process.platform !== 'win32' && process.platform !== 'darwin') throw new Error('로그인 창은 Windows와 macOS에서 지원합니다. 터미널에서 claude auth login --claudeai를 실행하세요.');
+  const cwd = os.homedir();
+  const args = process.platform === 'win32'
+    ? ['-NoProfile', '-NoExit', '-Command', `& '${executable.replaceAll("'", "''")}' auth login --claudeai`]
+    : ['-e', `tell application "Terminal" to do script ${appleQuoted(`${shellQuoted(executable)} auth login --claudeai`)}`];
+  claudeLoginWindowOpen = true;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(process.platform === 'win32' ? 'powershell.exe' : 'osascript', args, {
+        cwd, env: subscriptionEnvironment(), detached: true, windowsHide: false, stdio: 'ignore',
+      });
+      child.once('error', (error) => { claudeLoginWindowOpen = false; reject(error); });
+      child.once('close', () => { claudeLoginWindowOpen = false; });
+      child.once('spawn', () => { child.unref(); resolve(); });
+    });
+  } catch (error) { claudeLoginWindowOpen = false; throw error; }
+};
+
 export const openCliSession = async (provider: Provider, sessionId: string, cwd: string, configuredPath?: string): Promise<void> => {
   if (!isSessionId(sessionId)) throw new Error('대화 세션 ID가 올바르지 않습니다.');
   const executable = await resolveCliExecutable(provider, { configuredPath });
@@ -363,10 +387,7 @@ export const runCli = async (request: CliRequest): Promise<CliResult> => {
         try {
           const record = JSON.parse(line) as { type?: string; thread_id?: unknown; session_id?: unknown; message?: unknown; error?: { message?: unknown } };
           control?.accept(record);
-          if (record.type === 'error' || record.type === 'turn.failed') {
-            const message = record.error?.message ?? record.message;
-            if (typeof message === 'string') streamError = message.slice(-2000);
-          }
+          streamError = cliFailure(record) ?? streamError;
           const candidate = record.type === 'thread.started' ? record.thread_id : record.session_id;
           if (isSessionId(candidate)) sessionId = candidate;
         } catch { /* Raw output remains available in the transcript. */ }
@@ -393,6 +414,7 @@ export const runCli = async (request: CliRequest): Promise<CliResult> => {
     await finished(log);
   });
   request.onProgress?.({ kind: 'exited' });
+  if (streamError) throw new Error(`${request.choice.provider} 응답 실패: ${streamError}`);
   if (result !== 0) throw new Error(`${request.choice.provider} 실행 실패 (${result}): ${streamError || stderr.slice(-2000) || '자세한 내용은 실행 기록을 확인하세요.'}`);
   if (!latest.trim()) throw new Error(`${request.choice.provider}가 결과 문장을 반환하지 않았습니다. 실행 기록: ${relative}`);
   if (!sessionId) throw new Error(`${request.choice.provider}가 대화 세션 ID를 반환하지 않았습니다. 실행 기록: ${relative}`);

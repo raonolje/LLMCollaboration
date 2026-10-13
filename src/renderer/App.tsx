@@ -311,6 +311,15 @@ export default function App() {
   };
   const [modelActivities, setModelActivities] = useState<ModelActivity[]>([]);
   const [toolApprovals, setToolApprovals] = useState<ToolApproval[]>([]);
+  const seenToolApprovalIds = useRef(new Set<string>());
+  useEffect(() => {
+    const newlyPending = toolApprovals.some((item) => !seenToolApprovalIds.current.has(item.id));
+    seenToolApprovalIds.current = new Set(toolApprovals.map((item) => item.id));
+    if (!newlyPending) return;
+    setComposerOpen(true);
+    const frame = window.requestAnimationFrame(() => document.querySelector('.chat-dock')?.scrollTo({ top: 0 }));
+    return () => window.cancelAnimationFrame(frame);
+  }, [toolApprovals]);
   const [toolAnswers, setToolAnswers] = useState<Record<string, Record<string, string>>>({});
   useEffect(() => {
     let active = true;
@@ -1123,7 +1132,7 @@ export default function App() {
       onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setChatDragActive(false); }}
       onDrop={dropChatFiles}>
       <button type="button" className="chat-dock-toggle" aria-expanded={composerOpen} onClick={() => setComposerOpen((open) => !open)}>
-        {composerOpen ? '대화 입력 접기 ▾' : `대화 입력 열기 ▴${chatHasDraft ? ' · 작성 중' : ''}`}
+        {composerOpen ? '대화 입력 접기 ▾' : `대화 입력 열기 ▴${chatHasDraft ? ' · 작성 중' : ''}`}{toolApprovals.length > 0 && ` · 도구 승인 ${toolApprovals.length}건 대기`}
       </button>
       {toolApprovals.map((approval) => <section key={approval.id} className="panel panel-pad tool-approval" role="region" aria-label="도구 승인 대기">
         <strong>Claude · 도구 승인 대기: {approval.toolName}</strong><p>{projects.find((item) => item.path === approval.projectPath)?.name ?? approval.projectPath}</p>
@@ -1428,6 +1437,7 @@ export default function App() {
           return <div className="cli-entry" key={provider}>
             <div className="cli-row"><strong>{providerLabel(provider)}</strong><span className={'status-indicator ' + (ready ? 'ok' : '')}>{ready ? '구독 준비됨' : status?.installed ? '로그인 확인 필요' : status?.configured ? '지정 경로 확인 필요' : 'CLI 미발견'}</span></div>
             <div className="cli-auth">{status?.authentication ?? '상태 확인 중'}</div>
+            {provider === 'claude' && <div className="cli-actions"><button type="button" disabled={!status?.installed} onClick={() => void window.collab.openClaudeLogin().then(() => notify('Claude 로그인 창을 열었습니다. 브라우저에서 기존 구독 계정으로 로그인한 뒤 상태 새로고침을 눌러 주세요.')).catch((error: unknown) => notify(errorText(error), true))}>Claude 로그인</button></div>}
             {status?.executable && <div className="cli-path" title={status.executable}>{status.executable}</div>}
             <div className="cli-actions"><button type="button" onClick={() => void configureCli(provider)} disabled={cliBusy !== null}>{cliBusy === provider ? '확인 중…' : '경로 지정'}</button>{status?.configured && <button type="button" onClick={() => void configureCli(provider, true)} disabled={cliBusy !== null}>자동 탐색</button>}</div>
           </div>;

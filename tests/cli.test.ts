@@ -17,7 +17,7 @@ vi.mock('node:child_process', async (importOriginal) => {
 });
 vi.mock('node-pty', () => ({ spawn: spawnPty }));
 
-import { assertSubscription, cliArguments, cliStatus, handoffClaudeToDesktop, openCliSession, resolveCliExecutable, runCli } from '../src/main/services/cli';
+import { assertSubscription, cliArguments, cliStatus, handoffClaudeToDesktop, openClaudeLogin, openCliSession, resolveCliExecutable, runCli } from '../src/main/services/cli';
 
 const savedEnvironment = {
   path: process.env.PATH,
@@ -53,6 +53,19 @@ const withTemporaryWorkspace = async <T>(run: (workspace: string) => Promise<T>)
 const missingFromPath = Object.assign(new Error('spawn codex ENOENT'), { code: 'ENOENT' });
 
 describe.skipIf(process.platform !== 'win32')('Windows CLI discovery and execution', () => {
+  it('opens the configured Claude subscription login without requiring existing auth or duplicating windows', () => withTemporaryWorkspace(async (workspace) => {
+    const binary = path.join(workspace, "Claude's folder", 'claude.exe');
+    await mkdir(path.dirname(binary), { recursive: true }); await writeFile(binary, '');
+    const child = Object.assign(new EventEmitter(), { unref: vi.fn() });
+    spawnCli.mockImplementation(() => { queueMicrotask(() => child.emit('spawn')); return child; });
+    await openClaudeLogin(binary);
+    expect(spawnCli.mock.calls.at(-1)?.[0]).toBe('powershell.exe');
+    expect(spawnCli.mock.calls.at(-1)?.[1]).toEqual(['-NoProfile', '-NoExit', '-Command', `& '${binary.replaceAll("'", "''")}' auth login --claudeai`]);
+    expect(spawnCli.mock.calls.at(-1)?.[2]).toMatchObject({ windowsHide: false, detached: true, stdio: 'ignore' });
+    await expect(openClaudeLogin(binary)).rejects.toThrow('이미 열려');
+    child.emit('close', 0);
+    await openClaudeLogin(binary); child.emit('close', 0);
+  }));
   it('emits public progress before child exit, retains split UTF-8 and does not preview stderr', () => withTemporaryWorkspace(async (workspace) => {
     const binary = path.join(workspace, 'codex.exe');
     await writeFile(binary, '', 'utf8');

@@ -12,6 +12,7 @@ const api: CollaborationAPI = {
   chooseCliExecutable: () => invoke('collab:chooseCliExecutable'),
   setCliExecutable: (provider, filePath) => invoke('collab:setCliExecutable', provider, filePath),
   refreshCliStatus: () => invoke('collab:refreshCliStatus'),
+  openClaudeLogin: () => invoke('collab:openClaudeLogin'),
   refreshModelCatalogs: () => invoke('collab:refreshModelCatalogs'),
   checkAppUpdate: () => invoke('collab:checkAppUpdate'),
   downloadAppUpdate: (draft) => invoke('collab:downloadAppUpdate', draft),
